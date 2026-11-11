@@ -457,7 +457,10 @@ No application or Windows feasibility tests have been executed. Full
 application development must stop if a required guarantee cannot be proven,
 pending an explicit design revision.
 
-The project issue tracker destination and triage configuration have not been
-provided. Run `/setup-matt-pocock-skills` to configure them. This specification
-has not been published; publication requires user approval and must apply the
-`ready-for-agent` label without additional triage.
+The project uses GitHub Issues in
+[`sifiadlene/compareModels`](https://github.com/sifiadlene/compareModels), as
+configured in the [tracker conventions](./agents/issue-tracker.md) and
+[triage label mapping](./agents/triage-labels.md). Following user approval,
+this specification was published as
+[issue #1](https://github.com/sifiadlene/compareModels/issues/1) with the
+`ready-for-agent` label and no additional triage.
