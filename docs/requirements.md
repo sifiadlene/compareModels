@@ -7,8 +7,9 @@ ms.date: 2026-11-11
 ## Status and scope
 
 The requirements below were approved through the design interview, including
-the replacement of WPF with WinUI 3. Approval covers these documents only.
-Application scaffolding and implementation have not been authorized or performed.
+the replacement of WPF with WinUI 3. A controlled Windows feasibility slice is
+implemented for [issue #2](https://github.com/sifiadlene/compareModels/issues/2).
+The full comparison application and Copilot integration are not implemented.
 
 Canonical terms are defined in the [glossary](../GLOSSARY.md).
 
@@ -24,7 +25,8 @@ projects and native Windows task execution are outside version 1.
 
 ## Decision tree
 
-The product decisions are settled. The technical gates below remain unproven.
+The product decisions are settled. The feasibility results and remaining
+technical gates are recorded in the [specification](./spec.md).
 
 * Local Windows application
   * WinUI 3, C#/.NET, and the official Copilot SDK
@@ -309,9 +311,12 @@ managed policies, account, and selected model. Pin compatible SDK/runtime
 versions, record them, and reject versions that cannot enforce required
 restrictions. Experimental APIs require explicit compatibility validation.
 
-These gates have not been executed. The current Linux workspace cannot verify
-Windows acceptance. If any required guarantee fails, stop and revisit the
-design rather than weakening it or falling back to unsandboxed execution.
+Some Windows feasibility checks have been executed, but the acceptance gates
+remain incomplete. The
+[WSL container feasibility status](./spec.md#wsl-container-isolation-feasibility)
+records the evidence and remaining gaps. If a required guarantee fails or
+cannot be demonstrated, stop and revisit the design rather than weakening it
+or falling back to unsandboxed execution.
 
 ## Source references
 

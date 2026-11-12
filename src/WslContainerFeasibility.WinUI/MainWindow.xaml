@@ -1,0 +1,58 @@
+<Window
+    x:Class="WslContainerFeasibility.WinUI.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="WSL container feasibility">
+    <ScrollViewer>
+        <StackPanel Padding="24" Spacing="16" MaxWidth="760" HorizontalAlignment="Left">
+            <TextBlock Text="WSL container feasibility" Style="{ThemeResource TitleTextBlockStyle}" />
+            <TextBlock
+                Text="Run a fixed, non-sensitive Linux fixture after checking its container boundaries."
+                TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <Button
+                    x:Name="CheckButton"
+                    AutomationProperties.AutomationId="CheckPrerequisitesButton"
+                    Content="Check prerequisites"
+                    Click="CheckButton_Click" />
+                <Button
+                    x:Name="RunButton"
+                    AutomationProperties.AutomationId="RunFixtureButton"
+                    Content="Run fixture"
+                    Click="RunButton_Click" />
+                <Button
+                    x:Name="CancelButton"
+                    AutomationProperties.AutomationId="CancelFixtureButton"
+                    Content="Cancel"
+                    IsEnabled="False"
+                    Click="CancelButton_Click" />
+            </StackPanel>
+            <TextBlock Text="Prerequisites" Style="{ThemeResource SubtitleTextBlockStyle}" />
+            <TextBlock
+                x:Name="PrerequisiteText"
+                AutomationProperties.AutomationId="PrerequisiteStatus"
+                AutomationProperties.LiveSetting="Polite"
+                Text="Not checked. Running the fixture also checks prerequisites."
+                TextWrapping="Wrap" />
+            <TextBlock Text="Outcome" Style="{ThemeResource SubtitleTextBlockStyle}" />
+            <TextBlock
+                x:Name="OutcomeText"
+                AutomationProperties.AutomationId="FixtureOutcome"
+                AutomationProperties.LiveSetting="Polite"
+                Text="Not run." />
+            <TextBlock
+                x:Name="StatusText"
+                AutomationProperties.AutomationId="FixtureStatus"
+                AutomationProperties.LiveSetting="Polite"
+                Text="No container has been started."
+                TextWrapping="Wrap" />
+            <TextBlock Text="Evidence" Style="{ThemeResource SubtitleTextBlockStyle}" />
+            <TextBlock
+                x:Name="EvidenceText"
+                AutomationProperties.AutomationId="EvidencePath"
+                Text="No evidence saved yet."
+                TextWrapping="Wrap"
+                IsTextSelectionEnabled="True" />
+        </StackPanel>
+    </ScrollViewer>
+</Window>
