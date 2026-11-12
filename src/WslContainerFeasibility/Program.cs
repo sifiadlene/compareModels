@@ -9,6 +9,7 @@ internal static class Program
         "docker.io/library/alpine@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f";
     private const string CredentialCanaryName = "COMPAREMODELS_SYNTHETIC_CREDENTIAL";
     private const string SessionName = "CompareModels-Feasibility";
+    private const string ControlSessionName = "CompareModels-Feasibility-Control";
     private static readonly TimeSpan ProcessTimeout = TimeSpan.FromSeconds(15);
 
     private static async Task<int> Main()
@@ -47,88 +48,153 @@ internal static class Program
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "compareModels",
             "WslContainerFeasibility");
-        var sessionSettings = new SessionSettings(SessionName, storagePath)
-        {
-            HostLoopback = "host.wslc.internal"
-        };
+        string controlStoragePath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "compareModels",
+            "WslContainerFeasibilityControl");
 
-        using var session = new Session(sessionSettings);
-        session.Start();
+        using var controlSession = new Session(new SessionSettings(ControlSessionName, controlStoragePath)
+        {
+            CpuCount = 1,
+            MemorySizeInMB = 512
+        });
+        bool controlSessionStarted = false;
+        Container? controlContainer = null;
 
         try
         {
-            var pull = session.PullImageAsync(new PullImageOptions(ImageReference));
-            pull.Progress = (_, progress) =>
-                Console.WriteLine($"Image pull: {progress.Status} {progress.CurrentBytes}/{progress.TotalBytes}");
-            await pull;
-
-            var isolationOutput = await RunContainerAsync(
-                session,
+            controlSession.Start();
+            controlSessionStarted = true;
+            await PullImageAsync(controlSession);
+            controlContainer = CreateContainer(
+                controlSession,
                 ContainerNetworkingMode.None,
-                [
-                    "/bin/sh",
-                    "-c",
-                    """
-                    status=0
-                    if test -r "$1"; then
-                        echo HOST_FILE_CANARY_READABLE
-                        status=1
-                    else
-                        echo HOST_FILE_CANARY_BLOCKED
-                    fi
-                    if [ -n "${COMPAREMODELS_SYNTHETIC_CREDENTIAL:-}" ]; then
-                        echo CREDENTIAL_CANARY_INHERITED
-                        status=1
-                    else
-                        echo CREDENTIAL_CANARY_NOT_INHERITED
-                    fi
-                    exit "$status"
-                    """,
-                    "sh",
-                    ToWslPath(canaryPath)
-                ]);
-
-            RequireMarker(isolationOutput, "HOST_FILE_CANARY_BLOCKED");
-            RequireMarker(isolationOutput, "CREDENTIAL_CANARY_NOT_INHERITED");
-            RequireAbsentMarker(isolationOutput, "HOST_FILE_CANARY_READABLE");
-            RequireAbsentMarker(isolationOutput, "CREDENTIAL_CANARY_INHERITED");
-            Console.WriteLine("PASS: synthetic host-file and environment canaries are unavailable to the container");
-
-            using var reachableEndpoint = new LoopbackEndpoint();
-            var reachableRequest = reachableEndpoint.WaitForRequestAsync(TimeSpan.FromSeconds(10));
-            string reachableOutput = await RunContainerAsync(
-                session,
-                ContainerNetworkingMode.Bridged,
-                CreateNetworkProbeCommand(reachableEndpoint.Port));
-            if (!reachableOutput.Contains("NETWORK_ENDPOINT_REACHED", StringComparison.Ordinal)
-                || !await reachableRequest)
+                ["/bin/sleep", "600"]);
+            controlContainer.Start();
+            if (controlContainer.State != ContainerState.Running)
             {
-                throw new InvalidOperationException(
-                    $"Bridged control container could not reach the local probe endpoint. Output: {reachableOutput}");
+                throw new InvalidOperationException("The unrelated control container did not start.");
             }
 
-            Console.WriteLine("PASS: bridged control container reached the synthetic local endpoint");
-
-            using var blockedEndpoint = new LoopbackEndpoint();
-            var blockedRequest = blockedEndpoint.WaitForRequestAsync(TimeSpan.FromSeconds(5));
-            string blockedOutput = await RunContainerAsync(
-                session,
-                ContainerNetworkingMode.None,
-                CreateNetworkProbeCommand(blockedEndpoint.Port));
-            if (!blockedOutput.Contains("NETWORK_ENDPOINT_BLOCKED", StringComparison.Ordinal)
-                || await blockedRequest)
+            var sessionSettings = new SessionSettings(SessionName, storagePath)
             {
-                throw new InvalidOperationException(
-                    $"No-network container reached the local probe endpoint. Output: {blockedOutput}");
+                HostLoopback = "host.wslc.internal",
+                CpuCount = 1,
+                MemorySizeInMB = 512
+            };
+
+            using var session = new Session(sessionSettings);
+            session.Start();
+            try
+            {
+                await PullImageAsync(session);
+
+                var isolationOutput = await RunContainerAsync(
+                    session,
+                    ContainerNetworkingMode.None,
+                    [
+                        "/bin/sh",
+                        "-c",
+                        """
+                        status=0
+                        if test -r "$1"; then
+                            echo HOST_FILE_CANARY_READABLE
+                            status=1
+                        else
+                            echo HOST_FILE_CANARY_BLOCKED
+                        fi
+                        if [ -n "${COMPAREMODELS_SYNTHETIC_CREDENTIAL:-}" ]; then
+                            echo CREDENTIAL_CANARY_INHERITED
+                            status=1
+                        else
+                            echo CREDENTIAL_CANARY_NOT_INHERITED
+                        fi
+                        exit "$status"
+                        """,
+                        "sh",
+                        ToWslPath(canaryPath)
+                    ]);
+
+                RequireMarker(isolationOutput, "HOST_FILE_CANARY_BLOCKED");
+                RequireMarker(isolationOutput, "CREDENTIAL_CANARY_NOT_INHERITED");
+                RequireAbsentMarker(isolationOutput, "HOST_FILE_CANARY_READABLE");
+                RequireAbsentMarker(isolationOutput, "CREDENTIAL_CANARY_INHERITED");
+                Console.WriteLine("PASS: synthetic host-file and environment canaries are unavailable to the container");
+
+                using var reachableEndpoint = new LoopbackEndpoint();
+                var reachableRequest = reachableEndpoint.WaitForRequestAsync(TimeSpan.FromSeconds(10));
+                string reachableOutput = await RunContainerAsync(
+                    session,
+                    ContainerNetworkingMode.Bridged,
+                    CreateNetworkProbeCommand(reachableEndpoint.Port));
+                if (!reachableOutput.Contains("NETWORK_ENDPOINT_REACHED", StringComparison.Ordinal)
+                    || !await reachableRequest)
+                {
+                    throw new InvalidOperationException(
+                        $"Bridged control container could not reach the local probe endpoint. Output: {reachableOutput}");
+                }
+
+                Console.WriteLine("PASS: bridged control container reached the synthetic local endpoint");
+
+                using var blockedEndpoint = new LoopbackEndpoint();
+                var blockedRequest = blockedEndpoint.WaitForRequestAsync(TimeSpan.FromSeconds(5));
+                string blockedOutput = await RunContainerAsync(
+                    session,
+                    ContainerNetworkingMode.None,
+                    CreateNetworkProbeCommand(blockedEndpoint.Port));
+                if (!blockedOutput.Contains("NETWORK_ENDPOINT_BLOCKED", StringComparison.Ordinal)
+                    || await blockedRequest)
+                {
+                    throw new InvalidOperationException(
+                        $"No-network container reached the synthetic local endpoint. Output: {blockedOutput}");
+                }
+
+                Console.WriteLine("PASS: no-network container could not reach the synthetic local endpoint");
+                await VerifyDescendantCleanupAsync(session, simulatedTimeout: false);
+                await VerifyDescendantCleanupAsync(session, simulatedTimeout: true);
+            }
+            finally
+            {
+                session.Terminate();
             }
 
-            Console.WriteLine("PASS: no-network container could not reach the synthetic local endpoint");
-            return 0;
+            if (controlContainer.State != ContainerState.Running)
+            {
+                throw new InvalidOperationException(
+                    $"Cleaning up the application session changed the unrelated container state to {controlContainer.State}.");
+            }
+
+            await VerifyContainerStillUsableAsync(controlContainer);
+            Console.WriteLine("PASS: application-session cleanup left the unrelated session and container running");
         }
         finally
         {
-            session.Terminate();
+            try
+            {
+                if (controlContainer is not null)
+                {
+                    StopAndDeleteContainer(controlContainer);
+                    controlContainer.Dispose();
+                }
+            }
+            finally
+            {
+                if (controlSessionStarted)
+                {
+                    controlSession.Terminate();
+                }
+            }
         }
+
+        return 0;
+    }
+
+    private static async Task PullImageAsync(Session session)
+    {
+        var pull = session.PullImageAsync(new PullImageOptions(ImageReference));
+        pull.Progress = (_, progress) =>
+            Console.WriteLine($"Image pull: {progress.Status} {progress.CurrentBytes}/{progress.TotalBytes}");
+        await pull;
     }
 
     private static string[] CreateNetworkProbeCommand(int port) =>
@@ -136,7 +202,7 @@ internal static class Program
         "/bin/sh",
         "-c",
         """
-        if /bin/busybox wget -T 3 -q -O /dev/null "$1"; then
+        if /bin/busybox wget -T 3 -q -O /dev/null "$1" 2>/dev/null; then
             echo NETWORK_ENDPOINT_REACHED
         else
             echo NETWORK_ENDPOINT_BLOCKED
@@ -151,24 +217,7 @@ internal static class Program
         ContainerNetworkingMode networkingMode,
         string[] commandLine)
     {
-        var initProcessSettings = new ProcessSettings
-        {
-            CommandLine = commandLine,
-            OutputMode = ProcessOutputMode.Event
-        };
-        var containerSettings = new ContainerSettings(ImageReference)
-        {
-            Name = $"compare-models-feasibility-{Guid.NewGuid():N}",
-            InitProcess = initProcessSettings,
-            NetworkingMode = networkingMode,
-            EnableAutoRemove = false,
-            EnableGpu = false,
-            Privileged = false,
-            Volumes = [],
-            NamedVolumes = []
-        };
-
-        using var container = session.CreateContainer(containerSettings);
+        using var container = CreateContainer(session, networkingMode, commandLine);
         var output = new StringBuilder();
         var outputLock = new Lock();
         var exited = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -209,12 +258,174 @@ internal static class Program
         }
         finally
         {
-            if (container.State == ContainerState.Running)
+            StopAndDeleteContainer(container);
+        }
+    }
+
+    private static Container CreateContainer(
+        Session session,
+        ContainerNetworkingMode networkingMode,
+        string[] commandLine,
+        IList<ContainerVolume>? volumes = null)
+    {
+        var initProcessSettings = new ProcessSettings
+        {
+            CommandLine = commandLine,
+            OutputMode = ProcessOutputMode.Event
+        };
+        var containerSettings = new ContainerSettings(ImageReference)
+        {
+            Name = $"compare-models-feasibility-{Guid.NewGuid():N}",
+            InitProcess = initProcessSettings,
+            NetworkingMode = networkingMode,
+            EnableAutoRemove = false,
+            EnableGpu = false,
+            Privileged = false,
+            Volumes = volumes ?? [],
+            NamedVolumes = []
+        };
+
+        return session.CreateContainer(containerSettings);
+    }
+
+    private static async Task VerifyDescendantCleanupAsync(Session session, bool simulatedTimeout)
+    {
+        string canaryDirectory = Path.Combine(Path.GetTempPath(), $"compareModels-child-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(canaryDirectory);
+        string heartbeatPath = Path.Combine(canaryDirectory, "heartbeat");
+        string token = Guid.NewGuid().ToString("N");
+        string scenario = simulatedTimeout ? "timeout" : "cancellation";
+        string childCommand =
+            "while :; do printf x >> /probe/heartbeat; /bin/sleep 0.1; done";
+        string initScript =
+            $"/bin/sh -c \"{childCommand}\" descendant-{token} & child=$!; " +
+            "echo $child > /probe/child.pid; wait $child";
+        using var container = CreateContainer(
+            session,
+            ContainerNetworkingMode.None,
+            ["/bin/sh", "-c", initScript],
+            [new ContainerVolume(canaryDirectory, "/probe", false)]);
+        var standardOutput = new StringBuilder();
+        var standardError = new StringBuilder();
+        var outputLock = new Lock();
+        var processExited = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        container.InitProcess.OutputReceived += data =>
+        {
+            using (outputLock.EnterScope())
             {
-                container.Stop(Signal.SIGKILL, TimeSpan.FromSeconds(5));
+                standardOutput.Append(Encoding.UTF8.GetString(data));
+            }
+        };
+        container.InitProcess.ErrorReceived += data =>
+        {
+            using (outputLock.EnterScope())
+            {
+                standardError.Append(Encoding.UTF8.GetString(data));
+            }
+        };
+        container.InitProcess.Exited += exitCode => processExited.TrySetResult(exitCode);
+
+        try
+        {
+            container.Start();
+
+            var startDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+            while ((!File.Exists(heartbeatPath) || new FileInfo(heartbeatPath).Length < 5)
+                   && DateTime.UtcNow < startDeadline
+                   && container.State == ContainerState.Running)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(100));
             }
 
+            if (!File.Exists(heartbeatPath) || new FileInfo(heartbeatPath).Length < 5)
+            {
+                string output;
+                string error;
+                using (outputLock.EnterScope())
+                {
+                    output = standardOutput.ToString();
+                    error = standardError.ToString();
+                }
+
+                int? exitCode = processExited.Task.IsCompleted ? await processExited.Task : null;
+                throw new InvalidOperationException(
+                    $"The {scenario} descendant heartbeat did not start. State={container.State}, " +
+                    $"ExitCode={exitCode}, stdout={output}, stderr={error}, inspect={container.Inspect()}");
+            }
+
+            string childPidPath = Path.Combine(canaryDirectory, "child.pid");
+            if (!File.Exists(childPidPath))
+            {
+                throw new InvalidOperationException($"The {scenario} descendant did not report its PID.");
+            }
+
+            if (simulatedTimeout)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2));
+            }
+
+            container.Stop(
+                simulatedTimeout ? Signal.SIGKILL : Signal.SIGTERM,
+                TimeSpan.FromSeconds(5));
+
+            if (container.State != ContainerState.Exited)
+            {
+                throw new InvalidOperationException(
+                    $"The {scenario} stop left the container in state {container.State}.");
+            }
+
+            long sizeAfterStop = new FileInfo(heartbeatPath).Length;
+            await Task.Delay(TimeSpan.FromSeconds(1));
+            long sizeAfterObservation = new FileInfo(heartbeatPath).Length;
+            if (sizeAfterObservation != sizeAfterStop)
+            {
+                throw new InvalidOperationException(
+                    $"The {scenario} stop left a descendant writing to its canary directory.");
+            }
+
+            Console.WriteLine($"PASS: {scenario} stopped the container and its canary-writing descendant");
+        }
+        finally
+        {
+            try
+            {
+                StopAndDeleteContainer(container);
+            }
+            finally
+            {
+                Directory.Delete(canaryDirectory, recursive: true);
+            }
+        }
+    }
+
+    private static void StopAndDeleteContainer(Container container)
+    {
+        if (container.State == ContainerState.Running)
+        {
+            container.Stop(Signal.SIGKILL, TimeSpan.FromSeconds(5));
+        }
+
+        if (container.State != ContainerState.Deleted)
+        {
             container.Delete(DeleteContainerOption.Force);
+        }
+    }
+
+    private static async Task VerifyContainerStillUsableAsync(Container container)
+    {
+        var process = container.CreateProcess(new ProcessSettings
+        {
+            CommandLine = ["/bin/sh", "-c", "exit 0"],
+            OutputMode = ProcessOutputMode.Event
+        });
+        var exited = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        process.Exited += exitCode => exited.TrySetResult(exitCode);
+        process.Start();
+
+        Task completed = await Task.WhenAny(exited.Task, Task.Delay(TimeSpan.FromSeconds(10)));
+        if (completed != exited.Task || await exited.Task != 0)
+        {
+            throw new InvalidOperationException("The unrelated container did not execute its post-cleanup probe.");
         }
     }
 

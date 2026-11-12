@@ -498,13 +498,22 @@ reach that endpoint. The harness deleted its containers and terminated its
 named WSL session; a subsequent `wslc info` showed only the pre-existing CLI
 session, and `wslc list --all` showed no containers.
 
+Additional checks ran a child process that repeatedly wrote to a dedicated
+synthetic host directory mounted into its container. After both the
+cancellation-style `SIGTERM` stop and the timeout-style `SIGKILL` stop
+returned, the container was `Exited` and the heartbeat stopped changing during
+a one-second observation window. A separate harness-created control session's
+container, started before the application-owned session, remained running and
+accepted a process after the application-owned session was terminated. Cleanup
+stopped and deleted this control container and terminated its session.
+
 These checks do not prove general host-file isolation, protect real
 credentials, or establish resistance to deliberate container escapes. They do
 not test project transfer, WinUI, Copilot SDK authentication, MCP, process
-descendant termination on cancellation or timeout, unrelated-resource
-preservation, or restart recovery. They establish only the behaviors observed
-for this pinned image and configuration. No coding Task is enabled by this
-proof harness.
+descendant cleanup through the production application's cancellation and
+timeout workflow, preservation of pre-existing unrelated resources, or restart
+recovery. They establish only the behaviors observed for this pinned image and
+configuration. No coding Task is enabled by this proof harness.
 
 Run only controlled feasibility tests while these restrictions are unverified;
 do not enable coding Tasks or treat passing canary tests as proof against every
