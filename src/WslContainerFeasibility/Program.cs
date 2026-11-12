@@ -1,19 +1,31 @@
-using System.Net;
-using System.Net.Sockets;
 using System.Text;
 using Microsoft.WSL.Containers;
+using WslContainerFeasibility;
+using static WslContainerFeasibility.ContainerOperations;
 
 internal static class Program
 {
-    private const string ImageReference =
-        "docker.io/library/alpine@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f";
     private const string CredentialCanaryName = "COMPAREMODELS_SYNTHETIC_CREDENTIAL";
     private const string SessionName = "CompareModels-Feasibility";
     private const string ControlSessionName = "CompareModels-Feasibility-Control";
     private static readonly TimeSpan ProcessTimeout = TimeSpan.FromSeconds(15);
 
-    private static async Task<int> Main()
+    private static async Task<int> Main(string[] args)
     {
+        if (args is ["--fixture"])
+        {
+            var result = await new WslFixtureRunner().RunAsync(
+                new Progress<string>(message => Console.WriteLine(message)));
+            Console.WriteLine($"{result.Outcome}: {result.Summary}");
+            Console.WriteLine($"Evidence: {result.EvidencePath}");
+            return result.Outcome == FixtureOutcome.Completed ? 0 : 1;
+        }
+
+        if (args.Length != 0)
+        {
+            throw new ArgumentException("The only supported argument is --fixture.");
+        }
+
         var missingComponents = WslcService.GetMissingComponents();
         if (missingComponents.Count > 0)
         {
@@ -262,32 +274,6 @@ internal static class Program
         }
     }
 
-    private static Container CreateContainer(
-        Session session,
-        ContainerNetworkingMode networkingMode,
-        string[] commandLine,
-        IList<ContainerVolume>? volumes = null)
-    {
-        var initProcessSettings = new ProcessSettings
-        {
-            CommandLine = commandLine,
-            OutputMode = ProcessOutputMode.Event
-        };
-        var containerSettings = new ContainerSettings(ImageReference)
-        {
-            Name = $"compare-models-feasibility-{Guid.NewGuid():N}",
-            InitProcess = initProcessSettings,
-            NetworkingMode = networkingMode,
-            EnableAutoRemove = false,
-            EnableGpu = false,
-            Privileged = false,
-            Volumes = volumes ?? [],
-            NamedVolumes = []
-        };
-
-        return session.CreateContainer(containerSettings);
-    }
-
     private static async Task VerifyDescendantCleanupAsync(Session session, bool simulatedTimeout)
     {
         string canaryDirectory = Path.Combine(Path.GetTempPath(), $"compareModels-child-{Guid.NewGuid():N}");
@@ -398,22 +384,9 @@ internal static class Program
         }
     }
 
-    private static void StopAndDeleteContainer(Container container)
-    {
-        if (container.State == ContainerState.Running)
-        {
-            container.Stop(Signal.SIGKILL, TimeSpan.FromSeconds(5));
-        }
-
-        if (container.State != ContainerState.Deleted)
-        {
-            container.Delete(DeleteContainerOption.Force);
-        }
-    }
-
     private static async Task VerifyContainerStillUsableAsync(Container container)
     {
-        var process = container.CreateProcess(new ProcessSettings
+        using var process = container.CreateProcess(new ProcessSettings
         {
             CommandLine = ["/bin/sh", "-c", "exit 0"],
             OutputMode = ProcessOutputMode.Event
@@ -427,18 +400,6 @@ internal static class Program
         {
             throw new InvalidOperationException("The unrelated container did not execute its post-cleanup probe.");
         }
-    }
-
-    private static string ToWslPath(string windowsPath)
-    {
-        string root = Path.GetPathRoot(windowsPath)
-            ?? throw new ArgumentException("Expected a rooted Windows path.", nameof(windowsPath));
-        if (root.Length != 3 || root[1] != ':')
-        {
-            throw new ArgumentException("Expected a drive-letter Windows path.", nameof(windowsPath));
-        }
-
-        return $"/mnt/{char.ToLowerInvariant(root[0])}/{windowsPath[root.Length..].Replace('\\', '/')}";
     }
 
     private static void RequireMarker(string output, string marker)
@@ -457,50 +418,4 @@ internal static class Program
         }
     }
 
-    private sealed class LoopbackEndpoint : IDisposable
-    {
-        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
-        private readonly CancellationTokenSource _stop = new();
-        private readonly CancellationToken _stopToken;
-
-        public LoopbackEndpoint()
-        {
-            _stopToken = _stop.Token;
-            _listener.Start();
-        }
-
-        public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
-
-        public async Task<bool> WaitForRequestAsync(TimeSpan timeout)
-        {
-            using var timeoutCancellation = new CancellationTokenSource(timeout);
-            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(
-                timeoutCancellation.Token,
-                _stopToken);
-            try
-            {
-                using var client = await _listener.AcceptTcpClientAsync(cancellation.Token);
-                NetworkStream stream = client.GetStream();
-                byte[] response = Encoding.ASCII.GetBytes(
-                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK");
-                await stream.WriteAsync(response, cancellation.Token);
-                return true;
-            }
-            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
-            {
-                return false;
-            }
-            catch (SocketException) when (_stopToken.IsCancellationRequested)
-            {
-                return false;
-            }
-        }
-
-        public void Dispose()
-        {
-            _stop.Cancel();
-            _listener.Stop();
-            _stop.Dispose();
-        }
-    }
 }

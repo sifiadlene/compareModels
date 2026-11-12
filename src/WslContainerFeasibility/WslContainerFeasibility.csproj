@@ -11,6 +11,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.WSL.Containers" Version="3.0.5" />
+    <ProjectReference Include="../WslContainerFeasibility.Core/WslContainerFeasibility.Core.csproj" />
   </ItemGroup>
 
 </Project>
