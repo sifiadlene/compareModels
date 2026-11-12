@@ -309,9 +309,12 @@ managed policies, account, and selected model. Pin compatible SDK/runtime
 versions, record them, and reject versions that cannot enforce required
 restrictions. Experimental APIs require explicit compatibility validation.
 
-These gates have not been executed. The current Linux workspace cannot verify
-Windows acceptance. If any required guarantee fails, stop and revisit the
-design rather than weakening it or falling back to unsandboxed execution.
+Some Windows feasibility checks have been executed, but the acceptance gates
+remain incomplete. The
+[WSL container feasibility status](./spec.md#wsl-container-isolation-feasibility)
+records the evidence and remaining gaps. If a required guarantee fails or
+cannot be demonstrated, stop and revisit the design rather than weakening it
+or falling back to unsandboxed execution.
 
 ## Source references
 

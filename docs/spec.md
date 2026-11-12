@@ -464,3 +464,49 @@ configured in the [tracker conventions](./agents/issue-tracker.md) and
 this specification was published as
 [issue #1](https://github.com/sifiadlene/compareModels/issues/1) with the
 `ready-for-agent` label and no additional triage.
+
+### WSL container isolation feasibility
+
+Status on 2026-11-12: partial evidence for
+[issue #2](https://github.com/sifiadlene/compareModels/issues/2). The native
+WSL Container API runs Linux containers in WSL-backed sessions. Microsoft's
+[WSLC architecture description](https://devblogs.microsoft.com/commandline/wslc-architecture-deep-dive/)
+describes a session VM, per-session storage, and a session process running on
+behalf of the calling user. This differs from simply running a process in a
+normal WSL distribution.
+
+The general [WSL security model](https://wsl.dev/technical-documentation/security/)
+warns against assuming WSL and containers provide a host security boundary for
+untrusted code. That warning does not by itself establish the outcome of the
+specific native WSL Container configuration and tests required by this issue.
+Neither the architecture description nor API availability establishes that the
+required host-file, credential, and network restrictions are enforced.
+
+The [feasibility harness](../src/WslContainerFeasibility/README.md) uses
+`Microsoft.WSL.Containers` `3.0.5` and Alpine `3.22`, pinned to manifest digest
+`sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f`.
+It ran on Windows build `10.0.26300.9974`, WSL and WSL container runtime
+`3.0.5.0`, WSL kernel `6.18.58.1-1`, and .NET runtime `10.0.13`.
+
+The Windows .NET harness observed that its synthetic host-temp-file canary was
+not readable at the corresponding `/mnt/c/...` path in a container configured
+with no mounts. Its synthetic host environment-variable canary was not present
+in the container process. A bridged control container reached a synthetic HTTP
+endpoint listening on Windows loopback through `host.wslc.internal`; a
+container configured with `ContainerNetworkingMode.None` could not resolve or
+reach that endpoint. The harness deleted its containers and terminated its
+named WSL session; a subsequent `wslc info` showed only the pre-existing CLI
+session, and `wslc list --all` showed no containers.
+
+These checks do not prove general host-file isolation, protect real
+credentials, or establish resistance to deliberate container escapes. They do
+not test project transfer, WinUI, Copilot SDK authentication, MCP, process
+descendant termination on cancellation or timeout, unrelated-resource
+preservation, or restart recovery. They establish only the behaviors observed
+for this pinned image and configuration. No coding Task is enabled by this
+proof harness.
+
+Run only controlled feasibility tests while these restrictions are unverified;
+do not enable coding Tasks or treat passing canary tests as proof against every
+possible escape. If a required guarantee fails or cannot be demonstrated, stop
+and record the specific blocker rather than using an unsandboxed fallback.
