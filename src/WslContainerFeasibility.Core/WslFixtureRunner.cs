@@ -13,7 +13,7 @@ namespace WslContainerFeasibility;
 /// <summary>Runs a fixed, non-sensitive fixture after verifying container boundaries.</summary>
 public sealed class WslFixtureRunner
 {
-    private const string ApiPackageVersion = "3.0.5";
+    internal const string ApiPackageVersion = "3.0.5";
     private const string FixtureScript = """
         set -eu
         total="$(awk '{ total += $1 } END { print total }' /workspace/input.txt)"
@@ -279,7 +279,7 @@ public sealed class WslFixtureRunner
         }
 
         evidence.CompletedUtc = DateTimeOffset.UtcNow;
-        string evidencePath = await SaveEvidenceAsync(localAppData, evidence);
+        string evidencePath = await SaveEvidenceAsync(localAppData, evidence.RunId, evidence);
         string summary = evidence.Outcome switch
         {
             FixtureOutcome.Completed => "The controlled fixture completed with result 42.",
@@ -292,7 +292,7 @@ public sealed class WslFixtureRunner
         return new(evidence.Outcome, summary, evidencePath);
     }
 
-    private static async Task VerifyBoundariesAsync(
+    internal static async Task VerifyBoundariesAsync(
         Session session,
         Container container,
         string hostCanary,
@@ -637,7 +637,7 @@ public sealed class WslFixtureRunner
         """
     ];
 
-    private static async Task PullImageAsync(Session session, CancellationToken cancellationToken)
+    internal static async Task PullImageAsync(Session session, CancellationToken cancellationToken)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
@@ -659,7 +659,7 @@ public sealed class WslFixtureRunner
         }
     }
 
-    private static async Task<string> ReadWslVersionAsync(CancellationToken cancellationToken)
+    internal static async Task<string> ReadWslVersionAsync(CancellationToken cancellationToken)
     {
         var startInfo = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "wsl.exe"))
         {
@@ -707,11 +707,11 @@ public sealed class WslFixtureRunner
         return version;
     }
 
-    private static async Task<string> SaveEvidenceAsync(string localAppData, FixtureEvidence evidence)
+    internal static async Task<string> SaveEvidenceAsync(string localAppData, string runId, object evidence)
     {
         string directory = Path.Combine(localAppData, "compareModels", "Feasibility", "Evidence");
         Directory.CreateDirectory(directory);
-        string path = Path.Combine(directory, $"{evidence.RunId}.json");
+        string path = Path.Combine(directory, $"{runId}.json");
         string temporaryPath = $"{path}.tmp";
         var jsonOptions = new JsonSerializerOptions
         {

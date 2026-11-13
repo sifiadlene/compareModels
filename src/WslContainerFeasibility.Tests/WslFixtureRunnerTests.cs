@@ -12,6 +12,18 @@ public sealed class WslFixtureRunnerTests
     private readonly WslFixtureRunner _sut = new();
 
     [Fact]
+    public async Task GivenCopilotRunWithoutApproval_BillableAttemptIsBlocked()
+    {
+        var result = await new CopilotRunRunner().RunOnceAsync("auto", userApproved: false);
+        using var evidence = await ReadEvidenceAsync(
+            new FixtureRunResult(result.Outcome, result.Summary, result.EvidencePath));
+
+        Assert.Equal(FixtureOutcome.Blocked, result.Outcome);
+        Assert.False(evidence.RootElement.GetProperty("agentStarted").GetBoolean());
+        Assert.Equal("NotRun", evidence.RootElement.GetProperty("prerequisites").GetString());
+    }
+
+    [Fact]
     public async Task GivenIsolatedContainer_WhenFixtureRuns_EvidenceIsSavedAndOtherContainerSurvives()
     {
         using var owner = new TestSession();

@@ -53,6 +53,61 @@
                 Text="No evidence saved yet."
                 TextWrapping="Wrap"
                 IsTextSelectionEnabled="True" />
+            <TextBlock Text="One isolated Copilot attempt" Style="{ThemeResource SubtitleTextBlockStyle}" />
+            <TextBlock
+                Text="Sign in with the official Copilot CLI, then select an available strategy. A confirmation is required before the one potentially billable attempt."
+                TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <Button
+                    x:Name="SignInButton"
+                    AutomationProperties.AutomationId="CopilotSignInButton"
+                    Content="Sign in with Copilot CLI"
+                    Click="SignInButton_Click" />
+                <Button
+                    x:Name="LoadStrategiesButton"
+                    AutomationProperties.AutomationId="LoadCopilotStrategiesButton"
+                    Content="Load strategies"
+                    Click="LoadStrategiesButton_Click" />
+                <ComboBox
+                    x:Name="StrategyComboBox"
+                    AutomationProperties.AutomationId="CopilotStrategyPicker"
+                    PlaceholderText="Select a strategy"
+                    MinWidth="320"
+                    SelectionChanged="StrategyComboBox_SelectionChanged" />
+                <Button
+                    x:Name="RunCopilotButton"
+                    AutomationProperties.AutomationId="RunCopilotAttemptButton"
+                    Content="Run Copilot attempt"
+                    IsEnabled="False"
+                    Click="RunCopilotButton_Click" />
+            </StackPanel>
+            <TextBlock Text="Copilot outcome" Style="{ThemeResource SubtitleTextBlockStyle}" />
+            <TextBlock
+                x:Name="CopilotOutcomeText"
+                AutomationProperties.AutomationId="CopilotRunOutcome"
+                AutomationProperties.LiveSetting="Polite"
+                Text="Not run." />
+            <TextBlock
+                x:Name="CopilotStatusText"
+                AutomationProperties.AutomationId="CopilotRunStatus"
+                AutomationProperties.LiveSetting="Polite"
+                Text="No Copilot request has been sent."
+                TextWrapping="Wrap" />
+            <TextBlock
+                x:Name="CopilotEvidenceText"
+                AutomationProperties.AutomationId="CopilotEvidencePath"
+                Text="No Copilot evidence saved yet."
+                TextWrapping="Wrap"
+                IsTextSelectionEnabled="True" />
+            <TextBox
+                x:Name="CopilotPatchText"
+                AutomationProperties.AutomationId="CopilotRunPatch"
+                Header="Captured change"
+                IsReadOnly="True"
+                IsTabStop="True"
+                AcceptsReturn="True"
+                TextWrapping="Wrap"
+                MinHeight="120" />
         </StackPanel>
     </ScrollViewer>
 </Window>

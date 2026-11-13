@@ -47,6 +47,32 @@ dotnet build src/WslContainerFeasibility.WinUI/WslContainerFeasibility.WinUI.csp
 Select **Check prerequisites**, then **Run fixture**. The run repeats the
 prerequisite check even if it was not selected separately.
 
+## Prove one isolated Copilot run
+
+The WinUI app also supports one fixed Copilot SDK attempt. Install the official
+Copilot CLI and sign in with `copilot login` from **Copilot sign-in**. Then
+select **Load strategies**, choose an available model, and select **Run Copilot
+once**. The app asks for confirmation immediately before sending the request;
+the attempt may consume billable Copilot usage. Cancelling or declining the
+confirmation sends no request.
+
+The runner gives Copilot only a custom shell tool that executes commands in a
+new WSL container with no network or host mounts. It exposes a disposable
+fixture, not this checkout. SDK built-in tools, skills, custom agents, MCP
+servers, memory, and session storage are disabled. The host checks the fixture
+with a protected acceptance command and captures the resulting source, patch,
+SDK events, model identifiers when reported, usage-event presence, boundaries,
+runtime versions, and cleanup outcome. Evidence is saved under
+`%LOCALAPPDATA%\compareModels\Feasibility\Evidence`.
+
+The CLI login state remains in the app's local Copilot directory on the host;
+it is not copied into the task container. Strategy discovery and an actual
+Copilot attempt require an authorized account and an available CLI/runtime.
+Treat the proof as incomplete unless evidence records a completed attempt and
+a passing protected acceptance check. Usage may not be reported by the SDK.
+Synthetic canary checks do not prove general host isolation or resistance to
+deliberate container escapes.
+
 ## Run Windows integration tests
 
 From PowerShell on Windows with WSL Containers available:
