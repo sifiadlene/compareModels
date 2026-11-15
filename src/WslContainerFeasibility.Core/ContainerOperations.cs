@@ -11,7 +11,8 @@ internal static class ContainerOperations
         Session session,
         ContainerNetworkingMode networkingMode,
         string[] commandLine,
-        IList<ContainerVolume>? volumes = null)
+        IList<ContainerVolume>? volumes = null,
+        IList<ContainerPortMapping>? portMappings = null)
     {
         var settings = new ContainerSettings(ImageReference)
         {
@@ -27,7 +28,7 @@ internal static class ContainerOperations
             Privileged = false,
             Volumes = volumes ?? [],
             NamedVolumes = [],
-            PortMappings = []
+            PortMappings = portMappings ?? []
         };
 
         return session.CreateContainer(settings);
