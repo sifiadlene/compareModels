@@ -102,18 +102,17 @@ starting a Run. The base is digest-pinned; Debian package repositories can
 change, so a rebuild need not have the same digest. Retain the built image,
 not just its recipe, for reproducibility.
 
-The evidence records the local **configuration digest** (`docker inspect .Id`),
-the saved archive's **OCI manifest digest**, and the archive transport checksum.
-These are not fabricated pullable registry references: pushing may recompress
-layers and change the manifest digest. To run on Windows, a maintainer
-must first publish that image to an accessible registry using their normal,
-approved publication workflow, record the returned **repository manifest
-digest**, and pull `registry/repository@sha256:...`. For example, tag the
-already-built image for the registry, push it, and obtain its `RepoDigests`
-with `docker image inspect`. Record both that immutable reference and `.Id`.
-Do not pass the configuration digest as a repository manifest digest.
-No image has been published as part of this spike. Build for the Windows WSL
-machine's Linux architecture (the runner evidence is `linux/amd64`).
+The runner evidence records the local **configuration digest**, the saved
+archive checksum, and the published **repository manifest digest**. They are
+different values: pushing may recompress layers and change the manifest
+digest. Tag and push the built image through the approved registry workflow,
+then use its returned digest in `registry/repository@sha256:...`. Some Docker
+image stores report the manifest digest as `.Id`; obtain the configuration
+digest from the `Config` entry in `docker save`'s `manifest.json` instead. Do
+not pass the configuration digest as a repository manifest digest. The current
+Windows-test image and both digests are recorded in `docker-evidence.txt`.
+Build for the Windows WSL machine's Linux architecture (the tested image is
+`linux/amd64`).
 
 `Microsoft.WSL.Containers` cannot build images. This test uses
 `Session.PullImageAsync` on the externally built/published image. For offline
@@ -123,8 +122,8 @@ metadata and setuid modes.
 
 ### Minimal privileges and controls
 
-All workload containers are non-privileged and have no network. The WSL test
-sets `Privileged = false`, `CapabilityDrops = ["ALL"]`, and
+Docker workload containers are non-privileged and have no network. The WSL
+test requests `Privileged = false`, `CapabilityDrops = ["ALL"]`, and
 `CapabilityAdditions = ["SETUID", "SETGID", "SETPCAP"]`. Docker uses the
 equivalent `--cap-drop ALL` plus those three additions. They are only the
 trusted wrapper's bootstrap capabilities:
@@ -155,8 +154,12 @@ and does not promise to inherit init's dropped UID or `no_new_privs`. Negative
 controls intentionally use unwrapped processes in separate control
 containers. Do not expose this trusted host-side API directly to a workload.
 This proves process privilege dropping, not resistance to kernel escapes.
+The image has no Docker `ENTRYPOINT`: callers choose explicitly whether a
+process runs through `drop-workload` or as a trusted provisioning/control
+process. This also avoids relying on image entrypoint behavior that
+`ContainerSettings.InitProcess` cannot override.
 
-### Windows integration and mount-ownership blocker
+### Windows integration and privileged-mode limitation
 
 Run on Windows with .NET 10 and `Microsoft.WSL.Containers` **3.0.5** (the exact
 package version pinned by the existing project):
@@ -170,38 +173,60 @@ dotnet test src/WslContainerFeasibility.Tests/WslContainerFeasibility.Tests.cspr
 
 Missing digest inputs fail rather than skip. Ordinary feasibility tests can
 still be selected with `--filter FullyQualifiedName~WslFixtureRunnerTests`.
+For an authenticated registry, optionally set `NONROOT_SPIKE_REGISTRY_AUTH`
+to the base64-encoded Docker `X-Registry-Auth` JSON before running the test.
+Keep this credential in memory only; do not include it in evidence or commits.
 The new test uses unique containers/session storage, bounds commands/pulls,
-checks the inspected image ID, non-privileged flag and capability lists,
-and saves inspection, raw/provisioned mount ownership, command exits and
-output under `%LOCALAPPDATA%\compareModels\Feasibility\Evidence\nonroot-*.txt`.
-Only `WINDOWS_SPIKE_OK` **and** `CLEANUP_OK` indicate a completed test; retain
-the test result too. There is no catch-and-pass fallback.
+checks the inspected image ID and capability lists, and saves inspection,
+raw/provisioned mount ownership, command exits and output under
+`%LOCALAPPDATA%\compareModels\Feasibility\Evidence\nonroot-*.txt`. It explicitly
+sets `Privileged = false`, but WSL Containers 3.0.5 ignores that setting and
+its SDK inspection omits `HostConfig.Privileged`. To fail closed on the
+effective container state, the Windows test uses the same session's Docker
+daemon through the debug-only command
+`wslc --session <session-display-name> system session run docker inspect`.
+It checks the exact container ID and name and requires `HostConfig.Privileged`
+to be `false`; a missing CLI, timeout, nonzero result, malformed response,
+identity mismatch, or missing/true value fails the test. This is a
+version-pinned, read-only maintainer check, not a supported SDK API, and it
+proves the daemon's effective record—not that the SDK property caused it.
+The test gates the WSL container service version at 3.0.5, records init
+capability/seccomp state and the workspace filesystem type, and checks that
+UID 1001 cannot access the provisioned workspace. It also checks that no image
+entrypoint is present and the inspected command matches the requested init
+process. `WINDOWS_SPIKE_OK` and `CLEANUP_OK` are emitted only after the
+effective-state and workload checks pass. Retain the test result too; there is
+no catch-and-pass fallback.
 
 On Docker's Linux bind mount, ownership is numeric and shared across
 containers: trusted provisioning sets the directory to `1000:1000`, mode
 `0770`; both roles create `1000:1000` files with mode `0660` using umask `007`,
 read and append to the other role's files, without `chmod 777`.
 Provisioning/cleanup are separate trusted root operations, not workload
-capabilities. They use only the needed ownership/access capabilities and
-never privileged mode.
+capabilities. Provisioning adds `SETUID`/`SETGID` only to run the UID-1001
+denial check; workload processes drop all bootstrap capabilities. None uses
+privileged mode.
 
-**WSL `ContainerVolume` ownership is unverified, not assumed to match Docker.**
-The API's volume constructor has host path, container path and read-only
-fields, not UID/GID mapping. The Windows test records the initial UID/GID/mode
-of a synthetic Windows-local temporary directory, attempts `chown`/`chmod`
-in a separate provisioning container, then remounts it in both workload
-containers. The shared probes require ownership `1000:1000`, directory mode
-`0770` and file mode `0660` after remounting. Windows must also read both
-resulting files. This detects ownership or permission emulation that does
-not persist across `ContainerVolume` mounts.
+**WSL `ContainerVolume` ownership result:** on Windows 10.0.26300 with WSL
+Containers 3.0.5.0, the synthetic workspace reported filesystem type
+`fuseblk`; its raw directory mounted as `0:0` mode `0777`. Trusted provisioning
+changed it to `1000:1000` mode `0770`, and UID 1001 could not read, write, or
+traverse it. Both workload containers then observed that ownership after
+remount, created `1000:1000` files with mode `0660`, and shared/read/appended
+the files successfully. The API's volume constructor has host path, container
+path and read-only fields, not UID/GID mapping; this is an observation for
+this WSL version and host, not a general mapping guarantee.
 
-The cloud runner cannot exercise WSL, so the Windows ownership observation
-and final WSL acceptance remain **blocked pending a maintainer's local run**.
-If the mount ignores ownership/mode changes, or host policy disallows
-capability additions, retain the failing transcript and investigate a
-supported workspace provisioning/storage path separately. Do not relax
-permissions, enable privileged mode, add capabilities to the workload, or
-install a custom seccomp profile to force a pass.
+The image has no Docker `ENTRYPOINT`, because WSL 3.0.5 inspection showed that
+the image entrypoint is applied to the configured init command; an entrypoint
+that drops privileges would make trusted provisioning fail and would run the
+wrapper twice for workload init. Microsoft.WSL.Containers 3.0.5 masks out the
+`Privileged` flag before container creation; the daemon's observed `false` is
+the effective default, not an effect of `Privileged = false`. The only direct
+check used here is the debug-only, same-session Docker inspection above.
+Do not treat this as a supported application API, enable privileged mode, add
+capabilities to the workload, or install a custom seccomp profile to force a
+pass.
 
 ## Run the original console harness
 

@@ -51,15 +51,17 @@ for omitted in SETUID SETGID SETPCAP; do
         if test "$cap" != "$omitted"; then reduced+=(--cap-add "$cap"); fi
     done
     code=0
-    output=$(docker run --rm --network none "${reduced[@]}" "$image" /opt/spike/check-state 2>&1) || code=$?
+    output=$(docker run --rm --network none "${reduced[@]}" "$image" \
+        /opt/spike/drop-workload /opt/spike/check-state 2>&1) || code=$?
     printf 'without %s: exit=%s %s\n' "$omitted" "$code" "$output"
     if test "$omitted" = SETPCAP; then test "$code" = 1; else test "$code" = 127; fi
 done
 echo MINIMAL_CAPABILITIES_OK
 for role in agent executor; do
-    run --mount "type=bind,src=$workspace,dst=/workspace" "$image" /opt/spike/probe "$role"
+    run --mount "type=bind,src=$workspace,dst=/workspace" "$image" \
+        /opt/spike/drop-workload /opt/spike/probe "$role"
 done
-run --mount "type=bind,src=$workspace,dst=/workspace" "$image" /bin/sh -ec \
+run --mount "type=bind,src=$workspace,dst=/workspace" "$image" /opt/spike/drop-workload /bin/sh -ec \
     'test "$(cat /workspace/agent)" = "$(printf "agent\nexecutor")";
      test "$(cat /workspace/executor)" = executor;
      printf "agent\n" >> /workspace/executor; echo SHARED_WORKSPACE_OK'

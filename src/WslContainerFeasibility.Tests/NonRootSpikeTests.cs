@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Microsoft.WSL.Containers;
@@ -18,6 +19,7 @@ public sealed class NonRootSpikeTests(ITestOutputHelper output)
         Assert.Matches(@"^[^\s]+@sha256:[0-9a-f]{64}$", image);
         Assert.Matches(@"^sha256:[0-9a-f]{64}$", imageId);
         string runId = Guid.NewGuid().ToString("N");
+        string sessionName = $"CompareModels-NonRoot-{runId}";
         string directory = Path.Combine(Path.GetTempPath(), $"compareModels-nonroot-{runId}");
         string workspace = Path.Combine(directory, "workspace");
         string storage = Path.Combine(directory, "session");
@@ -27,25 +29,44 @@ public sealed class NonRootSpikeTests(ITestOutputHelper output)
         Directory.CreateDirectory(workspace);
         Directory.CreateDirectory(storage);
         var evidence = new StringBuilder($"Windows={Environment.OSVersion}\nImage={image}\nImageId={imageId}\n");
-        using var session = new Session(new SessionSettings($"CompareModels-NonRoot-{runId}", storage)
+        using var session = new Session(new SessionSettings(sessionName, storage)
         {
             CpuCount = 1,
             MemorySizeInMB = 512
         });
+        var serviceVersion = WslcService.GetVersion();
+        var installedVersion = new Version(
+            (int)serviceVersion.Major, (int)serviceVersion.Minor, (int)serviceVersion.Revision);
+        evidence.AppendLine($"WslContainerService={installedVersion}");
+        Assert.Equal(new Version(3, 0, 5), installedVersion);
         bool started = false;
         try
         {
             session.Start();
             started = true;
-            await session.PullImageAsync(new PullImageOptions(image)).AsTask().WaitAsync(TimeSpan.FromMinutes(3));
-            await InContainerAsync(["CHOWN", "FOWNER", "DAC_OVERRIDE"], async container =>
+            PullImageOptions pullOptions = new(image);
+            string? registryAuth = Environment.GetEnvironmentVariable("NONROOT_SPIKE_REGISTRY_AUTH");
+            if (!string.IsNullOrEmpty(registryAuth))
+            {
+                pullOptions.RegistryAuth = registryAuth;
+            }
+            await session.PullImageAsync(pullOptions).AsTask().WaitAsync(TimeSpan.FromMinutes(3));
+            await InContainerAsync(["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID"], async container =>
             {
                 await CheckAsync(container,
                     ["/bin/sh", "-ec",
                      "stat -c 'raw mount uid=%u gid=%g mode=%a' /workspace; " +
+                     "stat -f -c 'workspace fstype=%T' /workspace; " +
                      "chown 1000:1000 /workspace; chmod 0770 /workspace; " +
                      "stat -c 'provisioned mount uid=%u gid=%g mode=%a' /workspace; echo PROVISIONED"],
                     0, "PROVISIONED");
+                await CheckAsync(container,
+                    ["/usr/bin/setpriv", "--reuid", "1001", "--regid", "1001", "--clear-groups",
+                     "/bin/sh", "-ec",
+                     "test \"$(id -u)\" = 1001; " +
+                     "if test -r /workspace || test -w /workspace || test -x /workspace; then " +
+                     "exit 1; fi; echo UID_1001_DENIED"],
+                    0, "UID_1001_DENIED");
             });
 
             string[] minimum = ["SETUID", "SETGID", "SETPCAP"];
@@ -126,7 +147,7 @@ public sealed class NonRootSpikeTests(ITestOutputHelper output)
 
         async Task InContainerAsync(string[] capabilities, Func<Container, Task> check, bool dropInit = false)
         {
-            using var container = session.CreateContainer(new ContainerSettings(image)
+            var settings = new ContainerSettings(image)
             {
                 Name = $"nonroot-{Guid.NewGuid():N}",
                 Privileged = false,
@@ -145,7 +166,9 @@ public sealed class NonRootSpikeTests(ITestOutputHelper output)
                         : ["/bin/sleep", "600"],
                     OutputMode = ProcessOutputMode.Event
                 }
-            });
+            };
+            evidence.AppendLine($"ConfiguredPrivileged={settings.Privileged}");
+            using var container = session.CreateContainer(settings);
             try
             {
                 container.Start();
@@ -154,7 +177,38 @@ public sealed class NonRootSpikeTests(ITestOutputHelper output)
                 using var inspect = JsonDocument.Parse(inspection);
                 var root = inspect.RootElement;
                 var host = root.GetProperty("HostConfig");
-                Assert.False(host.GetProperty("Privileged").GetBoolean());
+                if (host.TryGetProperty("Privileged", out var sdkPrivileged))
+                {
+                    Assert.Equal(JsonValueKind.False, sdkPrivileged.ValueKind);
+                    evidence.AppendLine($"SdkInspectedPrivileged={sdkPrivileged}");
+                }
+                else
+                {
+                    evidence.AppendLine("SdkInspectedPrivileged=UNREPORTED");
+                }
+                string containerId = root.GetProperty("Id").GetString()!;
+                string containerName = root.GetProperty("Name").GetString()!;
+                Assert.Matches("^[0-9a-f]{64}$", containerId);
+                Assert.Equal($"/{settings.Name}", containerName);
+                var daemonInspection = await InspectContainerThroughDaemonAsync(
+                    sessionName, containerId, evidence);
+                Assert.True(daemonInspection.ExitCode == 0,
+                    $"Same-session Docker inspect failed: {daemonInspection.StandardError}{daemonInspection.StandardOutput}");
+                string[] daemonFields = daemonInspection.StandardOutput.Trim().Split('|');
+                Assert.Equal(3, daemonFields.Length);
+                Assert.Equal(containerId, daemonFields[0]);
+                Assert.Equal(containerName, daemonFields[1]);
+                Assert.Equal("false", daemonFields[2]);
+                evidence.AppendLine($"EffectivePrivileged={daemonFields[2]}");
+                var config = root.GetProperty("Config");
+                if (config.TryGetProperty("Entrypoint", out var entrypoint)
+                    && entrypoint.ValueKind != JsonValueKind.Null)
+                {
+                    Assert.Equal(JsonValueKind.Array, entrypoint.ValueKind);
+                    Assert.Empty(entrypoint.EnumerateArray());
+                }
+                Assert.Equal(settings.InitProcess.CommandLine,
+                    config.GetProperty("Cmd").EnumerateArray().Select(value => value.GetString()));
                 Assert.Equal("none", host.GetProperty("NetworkMode").GetString());
                 Assert.Equal(new[] { "ALL" },
                     host.GetProperty("CapDrop").EnumerateArray().Select(value => value.GetString()));
@@ -164,6 +218,12 @@ public sealed class NonRootSpikeTests(ITestOutputHelper output)
                             ? cap[4..] : value.GetString()).Order());
                 Assert.Equal(imageId, root.GetProperty("Image").GetString());
                 Assert.Equal(ContainerState.Running, container.State);
+                await CheckAsync(container,
+                    ["/bin/sh", "-ec",
+                     "uname -r; " +
+                     "awk '/^(CapEff|CapBnd|Seccomp|NoNewPrivs):/ { print \"init \" $0 }' /proc/1/status; " +
+                     "stat -f -c 'workspace fstype=%T' /workspace; echo INIT_STATE_RECORDED"],
+                    0, "init CapBnd:");
                 await check(container);
             }
             finally
@@ -188,5 +248,87 @@ public sealed class NonRootSpikeTests(ITestOutputHelper output)
                 Assert.DoesNotContain("STATE_OK", result.StandardOutput);
             }
         }
+    }
+
+    private static async Task<(int ExitCode, string StandardOutput, string StandardError)> InspectContainerThroughDaemonAsync(
+        string sessionName,
+        string containerId,
+        StringBuilder evidence)
+    {
+        string wslcPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "WSL", "wslc.exe");
+        if (!File.Exists(wslcPath))
+        {
+            evidence.AppendLine($"DaemonInspectFailure=Missing CLI: {wslcPath}");
+            throw new FileNotFoundException("The WSL container CLI required for daemon inspection is missing.", wslcPath);
+        }
+
+        var startInfo = new ProcessStartInfo(wslcPath)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
+        };
+        foreach (string argument in new[]
+        {
+            "--session", sessionName, "system", "session", "run",
+            "docker", "inspect", "--format", "{{.Id}}|{{.Name}}|{{.HostConfig.Privileged}}", containerId
+        })
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        using var process = new System.Diagnostics.Process { StartInfo = startInfo };
+        try
+        {
+            if (!process.Start())
+            {
+                evidence.AppendLine("DaemonInspectFailure=Process did not start.");
+                throw new InvalidOperationException("The WSL container CLI did not start.");
+            }
+        }
+        catch (System.ComponentModel.Win32Exception exception)
+        {
+            evidence.AppendLine($"DaemonInspectFailure={exception.Message}");
+            throw new InvalidOperationException("Could not start the WSL container CLI.", exception);
+        }
+
+        Task<string> standardOutput = process.StandardOutput.ReadToEndAsync();
+        Task<string> standardError = process.StandardError.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+            string timedOutOutput = await standardOutput;
+            string timedOutError = await standardError;
+            evidence.AppendLine("DaemonInspectFailure=Timed out after 15 seconds.");
+            evidence.AppendLine($"DaemonInspectOutput={timedOutOutput.Trim()}");
+            if (!string.IsNullOrWhiteSpace(timedOutError))
+            {
+                evidence.AppendLine($"DaemonInspectError={timedOutError.Trim()}");
+            }
+            throw new TimeoutException("The same-session Docker daemon inspection timed out.");
+        }
+
+        string output = await standardOutput;
+        string error = await standardError;
+        evidence.AppendLine($"DaemonInspectExitCode={process.ExitCode}");
+        evidence.AppendLine($"DaemonInspectOutput={output.Trim()}");
+        if (!string.IsNullOrWhiteSpace(error))
+        {
+            evidence.AppendLine($"DaemonInspectError={error.Trim()}");
+        }
+        return (process.ExitCode, output, error);
     }
 }

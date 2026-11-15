@@ -26,5 +26,3 @@ COPY drop-workload check-state probe /opt/spike/
 RUN chown root:root /usr/local/bin/setuid-probe \
     && chmod 4755 /usr/local/bin/setuid-probe \
     && chmod 0555 /opt/spike/*
-ENTRYPOINT ["/opt/spike/drop-workload"]
-CMD ["/opt/spike/probe", "agent"]
