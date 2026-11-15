@@ -63,6 +63,52 @@ another session. Descendant-stop tests mount only a synthetic temporary
 heartbeat directory and use the same process-stop path as the fixture runner.
 These tests pull the pinned image and save local evidence.
 
+### Windows localhost forwarding spike
+
+Run the forwarding integration test alone on the same Windows prerequisites:
+
+```powershell
+dotnet test src/WslContainerFeasibility.Tests/WslContainerFeasibility.Tests.csproj --filter "FullyQualifiedName~GivenMappedContainers_WhenForwardingIsProbed"
+```
+
+Or run it without xUnit and print the evidence path:
+
+```powershell
+dotnet run --project src/WslContainerFeasibility/WslContainerFeasibility.csproj -- --port-forwarding
+```
+
+The spike uses a pinned Alpine HTTP listener on `0.0.0.0:18080` in a
+bridged container and maps an automatically selected Windows port to
+`127.0.0.1`. It verifies the response contains a per-run marker. It probes
+each active non-loopback host address, first checking that a separate local
+listener is reachable on that address; absent or inaccessible interfaces
+make the result unverified, not a pass. A second bridged container verifies
+the listener's container address before and after the same request from a
+`None` container. Only the spike's uniquely named session and containers are
+cleaned up. The test also checks that a container in another session survives.
+
+The JSON evidence includes the complete `Inspect()` output, including network
+and port information, for the mapped containers and controls. `noneMapping`
+records `Reachable` or `Unreachable` only after the listener responds inside
+the `None` container. An API rejection, missing listener, unexpected response,
+unavailable host interface, or other unverified result blocks the spike and
+is recorded in the evidence; inspect the error and retain the evidence as a
+forwarding blocker. There is no unsandboxed fallback. The selected Windows
+ports are released before container creation, so a port allocation race can
+also block the run.
+
+The behavior of mappings with `Bridged` versus `None` is **not yet verified**:
+it must be determined from the local Windows evidence. `Bridged` is intended
+for inference connectivity, not a claim that the container has no network;
+the separate `None` control tests isolation. This synthetic HTTP listener does
+not demonstrate a Copilot headless server or inference.
+
+On Linux, only the platform-independent socket/HTTP probe tests can be run:
+
+```sh
+dotnet test src/WslContainerFeasibility.Tests/WslContainerFeasibility.Tests.csproj --filter FullyQualifiedName~WslPortForwardingProbeTests
+```
+
 ## Run the original console harness
 
 ```powershell

@@ -279,7 +279,7 @@ public sealed class WslFixtureRunner
         }
 
         evidence.CompletedUtc = DateTimeOffset.UtcNow;
-        string evidencePath = await SaveEvidenceAsync(localAppData, evidence);
+        string evidencePath = await SaveEvidenceAsync(localAppData, evidence.RunId, evidence);
         string summary = evidence.Outcome switch
         {
             FixtureOutcome.Completed => "The controlled fixture completed with result 42.",
@@ -637,7 +637,7 @@ public sealed class WslFixtureRunner
         """
     ];
 
-    private static async Task PullImageAsync(Session session, CancellationToken cancellationToken)
+    internal static async Task PullImageAsync(Session session, CancellationToken cancellationToken)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
@@ -707,11 +707,11 @@ public sealed class WslFixtureRunner
         return version;
     }
 
-    private static async Task<string> SaveEvidenceAsync(string localAppData, FixtureEvidence evidence)
+    internal static async Task<string> SaveEvidenceAsync<T>(string localAppData, string runId, T evidence)
     {
         string directory = Path.Combine(localAppData, "compareModels", "Feasibility", "Evidence");
         Directory.CreateDirectory(directory);
-        string path = Path.Combine(directory, $"{evidence.RunId}.json");
+        string path = Path.Combine(directory, $"{runId}.json");
         string temporaryPath = $"{path}.tmp";
         var jsonOptions = new JsonSerializerOptions
         {
@@ -742,7 +742,7 @@ public sealed class WslFixtureRunner
         }
     }
 
-    private static void CaptureCleanupError(List<string> errors, string resource, Action cleanup)
+    internal static void CaptureCleanupError(List<string> errors, string resource, Action cleanup)
     {
         try
         {

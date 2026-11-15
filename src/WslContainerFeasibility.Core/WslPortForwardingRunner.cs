@@ -1,0 +1,387 @@
+using System.Net;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
+using System.Text;
+using System.Text.Json;
+using Microsoft.WSL.Containers;
+using static WslContainerFeasibility.ContainerOperations;
+
+namespace WslContainerFeasibility;
+
+/// <summary>Probes Windows loopback forwarding to app-owned WSL containers.</summary>
+public sealed class WslPortForwardingRunner
+{
+    private const int ContainerPort = 18080;
+    private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(15);
+
+    /// <summary>Runs the forwarding spike and saves its evidence.</summary>
+    public async Task<FixtureRunResult> RunAsync(CancellationToken cancellationToken = default)
+    {
+        string runId = Guid.NewGuid().ToString("N");
+        string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(localAppData))
+        {
+            throw new IOException("The local application-data directory is unavailable.");
+        }
+
+        string storagePath = Path.Combine(localAppData, "compareModels", "Feasibility", "runs", runId);
+        var evidence = new ForwardingEvidence { RunId = runId, Windows = Environment.OSVersion.VersionString };
+        var containers = new List<Container>();
+        Session? session = null;
+        bool storageCreated = false;
+        bool startAttempted = false;
+        bool terminated = false;
+        try
+        {
+            var prerequisites = new WslFixtureRunner().CheckPrerequisites();
+            evidence.Prerequisites = prerequisites.Details;
+            if (!prerequisites.Ready)
+            {
+                throw new InvalidOperationException(prerequisites.Details);
+            }
+
+            var version = WslcService.GetVersion();
+            evidence.WslContainerService = $"{version.Major}.{version.Minor}.{version.Revision}";
+            Directory.CreateDirectory(storagePath);
+            storageCreated = true;
+            session = new Session(new SessionSettings($"CompareModels-{runId}", storagePath)
+            {
+                CpuCount = 1,
+                MemorySizeInMB = 512
+            });
+            startAttempted = true;
+            session.Start();
+            await WslFixtureRunner.PullImageAsync(session, cancellationToken);
+
+            int bridgedPort = ReservePort();
+            evidence.BridgedWindowsPort = bridgedPort;
+            Container? bridged = null;
+            try
+            {
+                bridged = CreateServer(session, ContainerNetworkingMode.Bridged, bridgedPort, $"{runId}-bridged");
+                containers.Add(bridged);
+                bridged.Start();
+                evidence.BridgedInspect = Inspect(bridged);
+            }
+            catch (Exception exception)
+            {
+                evidence.BridgedError = $"{exception.GetType().Name}: {exception.Message}";
+            }
+
+            // Probe the no-network mapping independently, even if bridged forwarding is unavailable.
+            int nonePort;
+            do
+            {
+                nonePort = ReservePort();
+            }
+            while (nonePort == bridgedPort);
+            evidence.NoneWindowsPort = nonePort;
+            try
+            {
+                Container noneServer = CreateServer(session, ContainerNetworkingMode.None, nonePort, $"{runId}-none");
+                containers.Add(noneServer);
+                noneServer.Start();
+                evidence.NoneInspect = Inspect(noneServer);
+                if (evidence.NoneInspect.Value.GetProperty("HostConfig").GetProperty("NetworkMode").GetString() != "none")
+                {
+                    throw new InvalidOperationException("The mapped container was not configured with no network.");
+                }
+                var local = await ProbeContainerAsync(noneServer, "127.0.0.1", $"{runId}-none", cancellationToken);
+                if (local.ExitCode != 0)
+                {
+                    evidence.NoneMapping = "Unverified: listener did not respond inside the container";
+                }
+                else
+                {
+                    evidence.NoneMapping = await WaitForHttpAsync(IPAddress.Loopback, nonePort, $"{runId}-none", cancellationToken)
+                        ? "Reachable" : "Unreachable";
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                evidence.NoneMapping = "Unverified";
+                evidence.NoneMappingError = $"{exception.GetType().Name}: {exception.Message}";
+            }
+
+            if (bridged is null || evidence.BridgedError is not null)
+            {
+                throw new InvalidOperationException($"The bridged mapped container could not be started or inspected: {evidence.BridgedError}");
+            }
+            if (!await WaitForHttpAsync(IPAddress.Loopback, bridgedPort, $"{runId}-bridged", cancellationToken))
+            {
+                throw new InvalidOperationException("The bridged container listener was not reachable through Windows loopback.");
+            }
+            evidence.Loopback = "Passed";
+
+            IPAddress[] addresses = GetNonLoopbackAddresses();
+            if (addresses.Length == 0)
+            {
+                throw new InvalidOperationException("No active non-loopback host addresses were available to test.");
+            }
+
+            foreach (IPAddress address in addresses)
+            {
+                // A separate positive control distinguishes an inaccessible host interface from a blocked mapping.
+                using var control = new TcpListener(address, 0);
+                control.Start();
+                int controlPort = ((IPEndPoint)control.LocalEndpoint).Port;
+                if (!await CanConnectAsync(address, controlPort, cancellationToken))
+                {
+                    evidence.NonLoopback.Add($"{address}: unverified (control unreachable)");
+                    throw new InvalidOperationException($"Host interface {address} could not be verified.");
+                }
+
+                if (await CanConnectAsync(address, bridgedPort, cancellationToken))
+                {
+                    evidence.NonLoopback.Add($"{address}: reachable");
+                    throw new InvalidOperationException($"The forwarded port was reachable on {address}.");
+                }
+                evidence.NonLoopback.Add($"{address}: unreachable");
+            }
+            evidence.NonLoopbackResult = "Passed";
+            if (!await WaitForHttpAsync(IPAddress.Loopback, bridgedPort, $"{runId}-bridged", cancellationToken))
+            {
+                throw new InvalidOperationException("The listener stopped during the non-loopback checks.");
+            }
+
+            using var inspect = JsonDocument.Parse(bridged.Inspect());
+            string? addressText = inspect.RootElement.GetProperty("NetworkSettings").GetProperty("IPAddress").GetString();
+            if (!IPAddress.TryParse(addressText, out var containerAddress)
+                || containerAddress.AddressFamily != AddressFamily.InterNetwork || IPAddress.IsLoopback(containerAddress))
+            {
+                throw new InvalidOperationException("Inspect did not provide a usable bridged container IPv4 address.");
+            }
+            evidence.BridgedContainerAddress = addressText;
+            Container networkControl = CreateContainer(session, ContainerNetworkingMode.Bridged, ["/bin/sleep", "600"]);
+            containers.Add(networkControl);
+            networkControl.Start();
+            evidence.NetworkControlInspect = Inspect(networkControl);
+            var positive = await ProbeContainerAsync(networkControl, addressText, $"{runId}-bridged", cancellationToken);
+            if (positive.ExitCode != 0)
+            {
+                throw new InvalidOperationException("The bridged listener's direct positive control failed.");
+            }
+
+            Container isolated = CreateContainer(session, ContainerNetworkingMode.None, ["/bin/sleep", "600"]);
+            containers.Add(isolated);
+            isolated.Start();
+            evidence.ControlInspect = Inspect(isolated);
+            if (evidence.ControlInspect.Value.GetProperty("HostConfig").GetProperty("NetworkMode").GetString() != "none")
+            {
+                throw new InvalidOperationException("The control container was not configured with no network.");
+            }
+            var blocked = await ProbeContainerAsync(isolated, addressText, $"{runId}-bridged", cancellationToken);
+            evidence.NoNetworkProbeExitCode = blocked.ExitCode;
+            var positiveAfter = await ProbeContainerAsync(networkControl, addressText, $"{runId}-bridged", cancellationToken);
+            if (blocked.ExitCode != 1 || positiveAfter.ExitCode != 0)
+            {
+                throw new InvalidOperationException("The no-network control was reachable or could not be verified.");
+            }
+            evidence.NoNetworkControl = "Passed";
+            if (evidence.NoneMapping is not ("Reachable" or "Unreachable"))
+            {
+                throw new InvalidOperationException("Mapping behavior with no networking was not verified.");
+            }
+            evidence.Outcome = FixtureOutcome.Completed;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            evidence.Outcome = FixtureOutcome.Cancelled;
+            evidence.Error = "The forwarding probe was cancelled.";
+        }
+        catch (Exception exception)
+        {
+            evidence.Error = $"{exception.GetType().Name}: {exception.Message}";
+        }
+        finally
+        {
+            foreach (Container container in containers)
+            {
+                WslFixtureRunner.CaptureCleanupError(evidence.CleanupErrors, "container", () => StopAndDeleteContainer(container));
+                WslFixtureRunner.CaptureCleanupError(evidence.CleanupErrors, "container handle", container.Dispose);
+            }
+            if (session is not null)
+            {
+                if (startAttempted)
+                {
+                    try
+                    {
+                        session.Terminate();
+                        terminated = true;
+                    }
+                    catch (Exception exception)
+                    {
+                        evidence.CleanupErrors.Add($"session: {exception.Message}");
+                    }
+                }
+                WslFixtureRunner.CaptureCleanupError(evidence.CleanupErrors, "session handle", session.Dispose);
+            }
+            if (storageCreated && (session is null || terminated))
+            {
+                WslFixtureRunner.CaptureCleanupError(evidence.CleanupErrors, "session storage", () => Directory.Delete(storagePath, true));
+            }
+            else if (storageCreated)
+            {
+                evidence.CleanupErrors.Add($"Session storage retained because termination was not confirmed: {storagePath}");
+            }
+        }
+
+        if (evidence.CleanupErrors.Count != 0)
+        {
+            evidence.Outcome = FixtureOutcome.Failed;
+        }
+        evidence.CompletedUtc = DateTimeOffset.UtcNow;
+        string path = await WslFixtureRunner.SaveEvidenceAsync(localAppData, runId, evidence);
+        return new(evidence.Outcome, evidence.Error ?? $"Forwarding probe: {evidence.Outcome}.", path);
+    }
+
+    private static Container CreateServer(Session session, ContainerNetworkingMode mode, int windowsPort, string marker) =>
+        CreateContainer(session, mode,
+            ["/bin/sh", "-c", "mkdir -p /www; printf '%s' \"$1\" > /www/index.html; exec /bin/busybox httpd -f -p 0.0.0.0:18080 -h /www", "sh", marker],
+            portMappings: [new ContainerPortMapping((ushort)windowsPort, ContainerPort, PortProtocol.TCP)
+            {
+                WindowsAddress = new Windows.Networking.HostName("127.0.0.1")
+            }]);
+
+    private static JsonElement Inspect(Container container)
+    {
+        using var document = JsonDocument.Parse(container.Inspect());
+        return document.RootElement.Clone();
+    }
+
+    private static int ReservePort()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        return port;
+    }
+
+    internal static IPAddress[] GetNonLoopbackAddresses() =>
+        NetworkInterface.GetAllNetworkInterfaces()
+            .Where(item => item.OperationalStatus == OperationalStatus.Up && item.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+            .SelectMany(item => item.GetIPProperties().UnicastAddresses)
+            .Select(item => item.Address)
+            .Where(address => !IPAddress.IsLoopback(address)
+                && (address.AddressFamily == AddressFamily.InterNetwork || address.AddressFamily == AddressFamily.InterNetworkV6))
+            .Distinct()
+            .ToArray();
+
+    internal static async Task<bool> CanConnectAsync(IPAddress address, int port, CancellationToken cancellationToken)
+    {
+        using var client = new TcpClient(address.AddressFamily);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(3));
+        try
+        {
+            await client.ConnectAsync(address, port, timeout.Token);
+            return true;
+        }
+        catch (SocketException exception) when (exception.SocketErrorCode is SocketError.ConnectionRefused
+            or SocketError.TimedOut or SocketError.HostUnreachable or SocketError.NetworkUnreachable)
+        {
+            return false;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeout.IsCancellationRequested)
+        {
+            return false;
+        }
+    }
+
+    internal static async Task<bool> WaitForHttpAsync(IPAddress address, int port, string marker, CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(ProbeTimeout);
+        bool connected = false;
+        while (!timeout.IsCancellationRequested)
+        {
+            try
+            {
+                using var client = new TcpClient(address.AddressFamily);
+                await client.ConnectAsync(address, port, timeout.Token);
+                connected = true;
+                using NetworkStream stream = client.GetStream();
+                await stream.WriteAsync(Encoding.ASCII.GetBytes("GET / HTTP/1.0\r\n\r\n"), timeout.Token);
+                using var reader = new StreamReader(stream);
+                string response = await reader.ReadToEndAsync(timeout.Token);
+                if (!response.StartsWith("HTTP/1.0 200 ", StringComparison.Ordinal)
+                    && !response.StartsWith("HTTP/1.1 200 ", StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("The port did not return HTTP 200.");
+                }
+                if (!response.EndsWith($"\r\n\r\n{marker}", StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("The port responded without the expected listener marker.");
+                }
+                return true;
+            }
+            catch (SocketException) when (!connected)
+            {
+                try
+                {
+                    await Task.Delay(250, timeout.Token);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    if (connected)
+                    {
+                        throw new InvalidOperationException("The port connected but did not return a verified response.");
+                    }
+                    return false;
+                }
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                return false;
+            }
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        return false;
+    }
+
+    private static Task<CommandResult> ProbeContainerAsync(Container container, string address, string marker, CancellationToken cancellationToken) =>
+        WslFixtureRunner.RunProcessAsync(container,
+            ["/bin/sh", "-c",
+                """
+                /bin/busybox --list | grep -Fx wget >/dev/null || exit 73
+                i=0
+                until /bin/busybox wget -T 3 -q -O /tmp/forward-probe "http://$1:18080/"; do
+                    i=$((i + 1))
+                    [ "$i" -lt 3 ] || exit 1
+                    /bin/sleep 1
+                done
+                grep -Fx "$2" /tmp/forward-probe >/dev/null || exit 74
+                """, "sh", address, marker],
+            ProbeTimeout, cancellationToken);
+}
+
+internal sealed class ForwardingEvidence
+{
+    public string RunId { get; init; } = string.Empty;
+    public DateTimeOffset StartedUtc { get; init; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset CompletedUtc { get; set; }
+    public string Windows { get; init; } = string.Empty;
+    public string WslContainersPackage { get; init; } = "3.0.5";
+    public string ImageReference { get; init; } = ContainerOperations.ImageReference;
+    public string? WslContainerService { get; set; }
+    public string? Prerequisites { get; set; }
+    public int BridgedWindowsPort { get; set; }
+    public int NoneWindowsPort { get; set; }
+    public JsonElement? BridgedInspect { get; set; }
+    public string? BridgedError { get; set; }
+    public JsonElement? NoneInspect { get; set; }
+    public JsonElement? ControlInspect { get; set; }
+    public JsonElement? NetworkControlInspect { get; set; }
+    public string? BridgedContainerAddress { get; set; }
+    public string Loopback { get; set; } = "NotRun";
+    public List<string> NonLoopback { get; set; } = [];
+    public string NonLoopbackResult { get; set; } = "NotRun";
+    public string NoneMapping { get; set; } = "NotRun";
+    public string? NoneMappingError { get; set; }
+    public int? NoNetworkProbeExitCode { get; set; }
+    public string NoNetworkControl { get; set; } = "NotRun";
+    public FixtureOutcome Outcome { get; set; } = FixtureOutcome.Blocked;
+    public string? Error { get; set; }
+    public List<string> CleanupErrors { get; set; } = [];
+}

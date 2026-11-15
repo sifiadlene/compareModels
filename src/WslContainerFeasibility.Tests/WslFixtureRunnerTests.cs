@@ -12,6 +12,43 @@ public sealed class WslFixtureRunnerTests
     private readonly WslFixtureRunner _sut = new();
 
     [Fact]
+    public async Task GivenMappedContainers_WhenForwardingIsProbed_BoundariesAreVerifiedAndOtherContainerSurvives()
+    {
+        using var owner = new TestSession();
+        await owner.StartAsync();
+        using var control = CreateContainer(owner.Session, ContainerNetworkingMode.None, ["/bin/sleep", "600"]);
+        try
+        {
+            control.Start();
+            var result = await new WslPortForwardingRunner().RunAsync();
+            using var evidence = await ReadEvidenceAsync(result);
+            var root = evidence.RootElement;
+            Assert.True(result.Outcome == FixtureOutcome.Completed,
+                $"{result.Summary} Evidence: {result.EvidencePath}");
+            Assert.Equal("Passed", root.GetProperty("loopback").GetString());
+            Assert.Equal("Passed", root.GetProperty("nonLoopbackResult").GetString());
+            Assert.NotEmpty(root.GetProperty("nonLoopback").EnumerateArray());
+            Assert.All(root.GetProperty("nonLoopback").EnumerateArray(),
+                item => Assert.EndsWith(": unreachable", item.GetString()));
+            Assert.Equal("Passed", root.GetProperty("noNetworkControl").GetString());
+            Assert.Equal(1, root.GetProperty("noNetworkProbeExitCode").GetInt32());
+            Assert.Contains(root.GetProperty("noneMapping").GetString(), new[] { "Reachable", "Unreachable" });
+            foreach (string name in new[] { "bridgedInspect", "noneInspect", "controlInspect", "networkControlInspect" })
+            {
+                var inspect = root.GetProperty(name);
+                Assert.Equal(JsonValueKind.Object, inspect.GetProperty("HostConfig").ValueKind);
+                Assert.Equal(JsonValueKind.Object, inspect.GetProperty("NetworkSettings").ValueKind);
+            }
+            Assert.Empty(root.GetProperty("cleanupErrors").EnumerateArray());
+            Assert.Equal(ContainerState.Running, control.State);
+        }
+        finally
+        {
+            StopAndDeleteContainer(control);
+        }
+    }
+
+    [Fact]
     public async Task GivenIsolatedContainer_WhenFixtureRuns_EvidenceIsSavedAndOtherContainerSurvives()
     {
         using var owner = new TestSession();

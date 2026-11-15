@@ -21,9 +21,17 @@ internal static class Program
             return result.Outcome == FixtureOutcome.Completed ? 0 : 1;
         }
 
+        if (args is ["--port-forwarding"])
+        {
+            var result = await new WslPortForwardingRunner().RunAsync();
+            Console.WriteLine($"{result.Outcome}: {result.Summary}");
+            Console.WriteLine($"Evidence: {result.EvidencePath}");
+            return result.Outcome == FixtureOutcome.Completed ? 0 : 1;
+        }
+
         if (args.Length != 0)
         {
-            throw new ArgumentException("The only supported argument is --fixture.");
+            throw new ArgumentException("Supported arguments are --fixture and --port-forwarding.");
         }
 
         var missingComponents = WslcService.GetMissingComponents();
