@@ -82,7 +82,10 @@ bridged container and maps an automatically selected Windows port to
 `127.0.0.1`. It verifies the response contains a per-run marker. It probes
 each active non-loopback host address, first checking that a separate local
 listener is reachable on that address; absent or inaccessible interfaces
-make the result unverified, not a pass. A second bridged container verifies
+make the result unverified, not a pass. It also requires both `Inspect()` and
+the Windows TCP listener table to report a loopback-only binding. These local
+checks do not establish remote reachability or firewall behavior; verify from
+another machine separately if that threat model matters. A second bridged container verifies
 the listener's container address before and after the same request from a
 `None` container. Only the spike's uniquely named session and containers are
 cleaned up. The test also checks that a container in another session survives.

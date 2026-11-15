@@ -112,6 +112,17 @@ public sealed class WslPortForwardingRunner
                 throw new InvalidOperationException("The bridged container listener was not reachable through Windows loopback.");
             }
             evidence.Loopback = "Passed";
+            if (!HasLoopbackMapping(evidence.BridgedInspect!.Value, bridgedPort))
+            {
+                throw new InvalidOperationException("Inspect did not confirm the requested loopback port binding.");
+            }
+            IPEndPoint[] listeners = IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners()
+                .Where(endpoint => endpoint.Port == bridgedPort).ToArray();
+            evidence.WindowsListeners = listeners.Select(endpoint => endpoint.ToString()).ToArray();
+            if (listeners.Length == 0 || listeners.Any(endpoint => !endpoint.Address.Equals(IPAddress.Loopback)))
+            {
+                throw new InvalidOperationException("Windows did not report an exclusively IPv4-loopback listener for the mapped port.");
+            }
 
             IPAddress[] addresses = GetNonLoopbackAddresses();
             if (addresses.Length == 0)
@@ -144,8 +155,7 @@ public sealed class WslPortForwardingRunner
                 throw new InvalidOperationException("The listener stopped during the non-loopback checks.");
             }
 
-            using var inspect = JsonDocument.Parse(bridged.Inspect());
-            string? addressText = inspect.RootElement.GetProperty("NetworkSettings").GetProperty("IPAddress").GetString();
+            string? addressText = GetBridgedAddress(evidence.BridgedInspect.Value);
             if (!IPAddress.TryParse(addressText, out var containerAddress)
                 || containerAddress.AddressFamily != AddressFamily.InterNetwork || IPAddress.IsLoopback(containerAddress))
             {
@@ -289,10 +299,35 @@ public sealed class WslPortForwardingRunner
         }
     }
 
-    internal static async Task<bool> WaitForHttpAsync(IPAddress address, int port, string marker, CancellationToken cancellationToken)
+    internal static bool HasLoopbackMapping(JsonElement inspect, int windowsPort)
+    {
+        if (!inspect.TryGetProperty("Ports", out var ports)
+            || !ports.TryGetProperty($"{ContainerPort}/tcp", out var bindings)
+            || bindings.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+        var entries = bindings.EnumerateArray().ToArray();
+        return entries.Length == 1
+            && entries[0].TryGetProperty("HostIp", out var ip) && ip.GetString() == "127.0.0.1"
+            && entries[0].TryGetProperty("HostPort", out var port) && port.GetString() == windowsPort.ToString();
+    }
+
+    internal static string? GetBridgedAddress(JsonElement inspect)
+    {
+        if (inspect.GetProperty("HostConfig").GetProperty("NetworkMode").GetString() != "bridge"
+            || !inspect.GetProperty("NetworkSettings").GetProperty("Networks").TryGetProperty("bridge", out var bridge))
+        {
+            return null;
+        }
+        return bridge.GetProperty("IPAddress").GetString();
+    }
+
+    internal static async Task<bool> WaitForHttpAsync(IPAddress address, int port, string marker, CancellationToken cancellationToken,
+        TimeSpan? probeTimeout = null)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(ProbeTimeout);
+        timeout.CancelAfter(probeTimeout ?? ProbeTimeout);
         bool connected = false;
         while (!timeout.IsCancellationRequested)
         {
@@ -324,15 +359,15 @@ public sealed class WslPortForwardingRunner
                 }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                 {
-                    if (connected)
-                    {
-                        throw new InvalidOperationException("The port connected but did not return a verified response.");
-                    }
                     return false;
                 }
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
+                if (connected)
+                {
+                    throw new InvalidOperationException("The port connected but did not return a verified response.");
+                }
                 return false;
             }
         }
@@ -374,6 +409,7 @@ internal sealed class ForwardingEvidence
     public JsonElement? ControlInspect { get; set; }
     public JsonElement? NetworkControlInspect { get; set; }
     public string? BridgedContainerAddress { get; set; }
+    public string[] WindowsListeners { get; set; } = [];
     public string Loopback { get; set; } = "NotRun";
     public List<string> NonLoopback { get; set; } = [];
     public string NonLoopbackResult { get; set; } = "NotRun";
