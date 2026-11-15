@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+role=${1:?agent or executor required}
+case "$role" in agent|executor) ;; *) exit 2;; esac
+/opt/spike/check-state
+for binary in /usr/bin/su /usr/bin/sudo /usr/local/bin/setuid-probe; do
+    test -x "$binary"
+    test -u "$binary"
+    test "$(stat -c %u "$binary")" = 0
+done
+if su root -c 'id -u' </dev/null; then
+    echo 'FAIL: su succeeded' >&2
+    exit 1
+fi
+if sudo -n /usr/bin/id -u; then
+    echo 'FAIL: sudo succeeded' >&2
+    exit 1
+fi
+if setuid-probe; then
+    echo 'FAIL: setuid probe regained root' >&2
+    exit 1
+fi
+echo ESCALATION_BLOCKED
+stat -c 'workspace uid=%u gid=%g mode=%a' /workspace
+test "$(stat -c %a /workspace)" = 770
+test "$(stat -c %u:%g /workspace)" = 1000:1000
+umask 007
+if test "$role" = agent; then
+    printf 'agent\n' > /workspace/agent
+else
+    test "$(cat /workspace/agent)" = agent
+    printf 'executor\n' >> /workspace/agent
+    printf 'executor\n' > /workspace/executor
+fi
+stat -c '%n uid=%u gid=%g mode=%a' "/workspace/$role"
+test "$(stat -c %u:%g "/workspace/$role")" = 1000:1000
+test "$(stat -c %a "/workspace/$role")" = 660
+echo "PROBE_OK=$role"

@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+exec /usr/bin/setpriv --reuid 1000 --regid 1000 --clear-groups \
+    --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs "$@"

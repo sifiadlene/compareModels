@@ -1,0 +1,68 @@
+#!/bin/bash
+set -euo pipefail
+image=${1:?usage: bash verify-docker IMAGE}
+workspace=$(mktemp -d)
+cleanup() {
+    docker run --rm --network none --cap-drop ALL --cap-add DAC_OVERRIDE --cap-add CHOWN --cap-add FOWNER \
+        --mount "type=bind,src=$workspace,dst=/workspace" --entrypoint /bin/rm \
+        "$image" -f /workspace/agent /workspace/executor
+    docker run --rm --network none --cap-drop ALL --cap-add CHOWN --cap-add FOWNER \
+        --mount "type=bind,src=$workspace,dst=/workspace" --entrypoint /bin/sh "$image" \
+        -ec "chown $(id -u):$(id -g) /workspace; chmod 700 /workspace"
+    rmdir "$workspace"
+}
+trap cleanup EXIT
+docker image inspect "$image" --format 'imageId={{.Id}} repoDigests={{json .RepoDigests}}'
+docker run --rm --network none --cap-drop ALL --entrypoint /bin/cat "$image" /etc/task-packages
+docker run --rm --network none --cap-drop ALL --cap-add CHOWN --cap-add FOWNER \
+    --mount "type=bind,src=$workspace,dst=/workspace" --entrypoint /bin/sh "$image" \
+    -ec 'chown 1000:1000 /workspace; chmod 0770 /workspace'
+caps=(--cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add SETPCAP)
+run() { docker run --rm --network none "${caps[@]}" "$@"; }
+expect_rejection() {
+    local output code=0
+    output=$(run --entrypoint "$1" "$image" "${@:2}" 2>&1) || code=$?
+    printf '%s\n' "$output"
+    test "$code" = 1
+    if grep -q STATE_OK <<< "$output"; then
+        echo 'FAIL: unsafe state accepted' >&2
+        exit 1
+    fi
+}
+# The same state verifier must reject root and a non-root process retaining CapBnd.
+expect_rejection /opt/spike/check-state
+expect_rejection /usr/bin/setpriv --reuid 1000 --regid 1000 --clear-groups \
+    --no-new-privs /opt/spike/check-state
+expect_rejection /usr/bin/setpriv --inh-caps=+setuid /usr/bin/setpriv \
+    --ambient-caps=+setuid --bounding-set=-all --reuid 1000 --regid 1000 \
+    --clear-groups --no-new-privs /opt/spike/check-state
+echo NEGATIVE_STATE_CONTROLS_OK
+# Without no_new_privs and the bounding-set drop, both escalation fixtures work.
+run --entrypoint /usr/bin/setpriv "$image" --reuid 1000 --regid 1000 --clear-groups \
+    /usr/local/bin/setuid-probe
+test "$(run --entrypoint /usr/bin/setpriv "$image" --reuid 1000 --regid 1000 \
+    --clear-groups /usr/bin/sudo -n /usr/bin/id -u)" = 0
+test "$(run --entrypoint /usr/bin/setpriv "$image" --reuid 1000 --regid 1000 \
+    --clear-groups /usr/bin/su root -c '/usr/bin/id -u')" = 0
+echo ESCALATION_CONTROLS_OK
+for omitted in SETUID SETGID SETPCAP; do
+    reduced=(--cap-drop ALL)
+    for cap in SETUID SETGID SETPCAP; do
+        if test "$cap" != "$omitted"; then reduced+=(--cap-add "$cap"); fi
+    done
+    code=0
+    output=$(docker run --rm --network none "${reduced[@]}" "$image" \
+        /opt/spike/drop-workload /opt/spike/check-state 2>&1) || code=$?
+    printf 'without %s: exit=%s %s\n' "$omitted" "$code" "$output"
+    if test "$omitted" = SETPCAP; then test "$code" = 1; else test "$code" = 127; fi
+done
+echo MINIMAL_CAPABILITIES_OK
+for role in agent executor; do
+    run --mount "type=bind,src=$workspace,dst=/workspace" "$image" \
+        /opt/spike/drop-workload /opt/spike/probe "$role"
+done
+run --mount "type=bind,src=$workspace,dst=/workspace" "$image" /opt/spike/drop-workload /bin/sh -ec \
+    'test "$(cat /workspace/agent)" = "$(printf "agent\nexecutor")";
+     test "$(cat /workspace/executor)" = executor;
+     printf "agent\n" >> /workspace/executor; echo SHARED_WORKSPACE_OK'
+echo DOCKER_SPIKE_OK

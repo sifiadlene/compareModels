@@ -1,0 +1,56 @@
+Non-root agent/executor spike evidence
+Date: 2026-11-15
+Architecture: linux/amd64
+
+Pinned base:
+debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
+Declared Task packages: git jq
+
+Rebuilt test image:
+Configuration digest: sha256:5d50802f4e4ed3225c4484d7451eebdb9fcd657ba710aca7469b2871f2cd732d
+Azure Container Registry reference:
+acrforbicep.azurecr.io/comparemodels/nonroot-spike@sha256:9aafc1a850c44174f66f41dbd5d95ac1dcc1a823113e2b77d6c507a533b32d8b
+Saved docker archive SHA-256:
+df084c98ac5a23383c7cf2c30527a622554f03829f3747ae5e172a3a9330f932
+The registry manifest digest and image configuration digest are distinct.
+The image has no Entrypoint; callers explicitly invoke drop-workload for
+workloads and trusted provisioning commands.
+
+Docker verification:
+Command: bash src/NonRootSpike/verify-docker comparemodels-nonroot-spike:wsl-init-contract
+Result: DOCKER_SPIKE_OK; exit status 0.
+Inspected configuration: Privileged=false, CapDrop=["ALL"],
+CapAdd=["CAP_SETGID","CAP_SETPCAP","CAP_SETUID"], network="none".
+Negative state controls rejected root, a retained bounding set, and effective
+SETUID. Each escalation fixture (su, sudo, setuid probe) regained root in its
+unsafe baseline and was blocked after the wrapper.
+Omitting SETUID and SETGID caused setpriv to fail with exit 127. Omitting
+SETPCAP left CapBnd=00000000000000c0 and the state verifier failed with exit 1.
+Both synthetic roles ran with UID/GID 1000, zero effective/bounding/
+inheritable/ambient capabilities, and NoNewPrivs=1. Their shared files had
+ownership 1000:1000 and mode 0660; cross-role read/append passed.
+
+Windows/WSL integration:
+Runtime: Microsoft.WSL.Containers 3.0.5, WSL 3.0.5.0, linux/amd64.
+Test: NonRootSpikeTests.GivenNonPrivilegedContainers_WhenPrivilegesAreDropped_BothRolesShareWorkspaceWithoutRoot
+Result: passed; WSL container service version gate 3.0.5, WINDOWS_SPIKE_OK,
+and CLEANUP_OK.
+Effective privileged state: the test queried the same session's Docker daemon
+for all seven exact container IDs. All IDs/names matched SDK inspection and
+all seven daemon records reported HostConfig.Privileged=false.
+SDK behavior: ContainerSettings.Privileged is dropped by WSL Containers 3.0.5;
+the daemon's false is its effective default, not an effect of setting false.
+The same-session wslc inspection is a read-only debug interface, not a
+supported public API; the integration test fails closed if it is missing,
+times out, returns a nonzero result, mismatches container identity, or does
+not return exactly false.
+Kernel evidence: the workload processes had UID/GID 1000, zero effective,
+bounding, inheritable, and ambient capabilities, and NoNewPrivs=1.
+Kernel 6.18.58.1-microsoft-standard-WSL2; Seccomp=2 was observed.
+Control-container init CapBnd matched its configured capability additions;
+wrapped workload init CapBnd was zero.
+ContainerVolume filesystem type: fuseblk. Raw directory: uid=0 gid=0 mode=777.
+Trusted provisioning changed it to uid=1000 gid=1000 mode=770; UID 1001 was
+denied access. Ownership persisted across workload remounts. Both roles
+created mode-0660 files and shared/read/appended them.
+Evidence: %LOCALAPPDATA%\compareModels\Feasibility\Evidence\nonroot-511d5ea4a8ff45e4a7a4c46a49eea23f.txt

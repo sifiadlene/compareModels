@@ -1,1 +1,5 @@
+/src/NonRootSpike/check-state text eol=lf
+/src/NonRootSpike/drop-workload text eol=lf
+/src/NonRootSpike/probe text eol=lf
+/src/NonRootSpike/verify-docker text eol=lf
 *.cs text eol=lf
