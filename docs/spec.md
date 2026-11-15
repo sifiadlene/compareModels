@@ -525,8 +525,10 @@ tar -xzf copilot-linux-x64.tar.gz
 COPILOT_CLI_PATH="$work/copilot" dotnet test /absolute/repository/path/src/CopilotHeadlessFeasibility.Tests
 mkdir "$work/home"
 export COPILOT_CONNECTION_TOKEN="$(openssl rand -hex 32)"
-env -i HOME="$work/home" PATH="$PATH" COPILOT_CONNECTION_TOKEN="$COPILOT_CONNECTION_TOKEN" \
-  "$work/copilot" --headless --port 47839 --no-auto-update --log-level none >/dev/null 2>&1 &
+env -i HOME="$work/home" PATH="$PATH" bash -c \
+  'IFS= read -r COPILOT_CONNECTION_TOKEN; export COPILOT_CONNECTION_TOKEN
+   exec "$1" --headless --port 47839 --no-auto-update --log-level none' \
+  _ "$work/copilot" <<< "$COPILOT_CONNECTION_TOKEN" >/dev/null 2>&1 &
 server=$!
 dotnet run --project /absolute/repository/path/src/CopilotHeadlessFeasibility -- http://127.0.0.1:47839
 kill "$server"

@@ -88,7 +88,8 @@ public sealed class HeadlessServerTests
                     Assert.Equal(0, spike.ExitCode);
                     Assert.False(result.Contains(token) || errors.Contains(token), "Output must not contain the connection token.");
                     Assert.True(result.Contains("Model listing: unverified"), "Unauthenticated model listing must be unverified.");
-                    Assert.True(result.Contains("Initialized session tools without inference: view, create, edit, grep, glob, sandbox-run_command"),
+                    Assert.True(result.Split('\n', StringSplitOptions.TrimEntries).Contains(
+                        "Initialized session tools without inference: view, create, edit, grep, glob, sandbox-run_command"),
                         "Unexpected initialized tool list.");
                 }
                 finally
