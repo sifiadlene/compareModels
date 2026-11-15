@@ -63,6 +63,41 @@ public sealed class HeadlessServerTests
             Assert.Equal("1.0.112", status.Version);
             Assert.Equal(3, status.ProtocolVersion);
 
+            if (!missing)
+            {
+                var spikeStart = new ProcessStartInfo("dotnet")
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+                spikeStart.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, "CopilotHeadlessFeasibility.dll"));
+                spikeStart.ArgumentList.Add(url);
+                spikeStart.Environment.Clear();
+                spikeStart.Environment["HOME"] = home;
+                spikeStart.Environment["PATH"] = start.Environment["PATH"];
+                spikeStart.Environment["COPILOT_CONNECTION_TOKEN"] = token;
+                using var spike = Process.Start(spikeStart)!;
+                Task<string> output = spike.StandardOutput.ReadToEndAsync();
+                Task<string> errorOutput = spike.StandardError.ReadToEndAsync();
+                try
+                {
+                    await spike.WaitForExitAsync(timeout.Token);
+                    string result = await output;
+                    string errors = await errorOutput;
+                    Assert.Equal(0, spike.ExitCode);
+                    Assert.False(result.Contains(token) || errors.Contains(token), "Output must not contain the connection token.");
+                    Assert.True(result.Contains("Model listing: unverified"), "Unauthenticated model listing must be unverified.");
+                    Assert.True(result.Contains("Initialized session tools without inference: view, create, edit, grep, glob, sandbox-run_command"),
+                        "Unexpected initialized tool list.");
+                }
+                finally
+                {
+                    if (!spike.HasExited)
+                        spike.Kill(entireProcessTree: true);
+                }
+            }
+
             await using var invalid = Connect(url, missing ? null : "incorrect-connection-token");
             var error = await Assert.ThrowsAsync<IOException>(() => invalid.StartAsync(timeout.Token));
             Assert.Contains("AUTHENTICATION_FAILED", error.Message);

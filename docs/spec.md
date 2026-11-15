@@ -466,6 +466,81 @@ this specification was published as
 [issue #1](https://github.com/sifiadlene/compareModels/issues/1) with the
 `ready-for-agent` label and no additional triage.
 
+### Copilot SDK to headless CLI feasibility
+
+On Linux x64, the .NET `GitHub.Copilot.SDK` 1.0.34 connected through
+`RuntimeConnection.ForUri` to an external CLI 1.0.112 server started with
+`--headless --port` and `--no-auto-update`. `GetStatusAsync` returned version
+`1.0.112` and protocol `3`. The
+[release archive](https://github.com/github/copilot-cli/releases/tag/v1.0.112)
+was checked against `SHA256SUMS.txt`; the `copilot-linux-x64.tar.gz` SHA-256 was
+`dfe7e59acf04f0b7f59b024ea9db101a9246503e9bf7152eb668fbb2a469b151`.
+The correct connection token worked, while wrong and missing tokens both
+returned `AUTHENTICATION_FAILED`; the live tests check each case against a
+fresh server after a successful status check. The connection token is distinct
+from GitHub authentication. The SDK was not given a GitHub token or
+`UseLoggedInUser`; GitHub authentication belongs to the external server.
+
+The server ran with an empty temporary home and no Copilot authentication.
+`ListModelsAsync` returned `Not authenticated. Please authenticate first.`;
+model discovery and the per-model ID, policy state and billing multiplier are
+**unverified**, not a pass. The spike prints these fields if an authenticated
+server can return them. No prompt or billable inference was sent.
+
+With model `gpt-4.1`, the session was created with the requested allowlist,
+a non-executing stdio `sandbox` MCP server, built-in MCP servers
+`github-mcp-server` and `githubiq` disabled, no included built-in sub-agents,
+and skills, session store, host git operations and custom instructions
+disabled. Before initialization `session.tools.getCurrentMetadata` returned
+an empty list. Calling `session.tools.initializeAndValidate` and then
+`getCurrentMetadata` **without inference** returned exactly `view`, `create`,
+`edit`, `grep`, `glob`, and `sandbox-run_command` (the MCP tool). The requested
+`apply_patch` did not appear; configuration acceptance is not evidence that
+every requested tool is available. The separate `tools.list` catalog for
+`gpt-4.1` returned the Linux built-ins `bash`, `read_bash`, `stop_bash`,
+`list_bash`, `glob`, `grep`, `create`, `edit`, `skill`, `view`, `web_fetch`,
+`task`, `read_agent`, `list_agents`, and `write_agent`. This catalog is not the
+filtered session list; both results can depend on model and runtime settings.
+These observations do not establish sandbox isolation or policy enforcement.
+
+The SDK 1.0.34 package README documents that when `OnPermissionRequest` is
+omitted, permission requests are emitted as events and left pending for manual
+resolution: no automatic approval or denial is supplied by the SDK handler.
+No actual permission request was exercised in this no-inference spike; runtime
+policy and unattended behavior therefore remain unverified. A production host
+must explicitly implement and validate its permission policy.
+
+To reproduce the unauthenticated Linux x64 run from the repository root
+(`dotnet` 10 and `curl` are required):
+
+```bash
+work=$(mktemp -d)
+cd "$work"
+base=https://github.com/github/copilot-cli/releases/download/v1.0.112
+curl -fsSLO "$base/SHA256SUMS.txt"
+curl -fsSLO "$base/copilot-linux-x64.tar.gz"
+grep ' copilot-linux-x64.tar.gz$' SHA256SUMS.txt | sha256sum -c - || exit 1
+tar -xzf copilot-linux-x64.tar.gz
+# Run from the repository root, substituting its absolute path below.
+COPILOT_CLI_PATH="$work/copilot" dotnet test /absolute/repository/path/src/CopilotHeadlessFeasibility.Tests
+mkdir "$work/home"
+export COPILOT_CONNECTION_TOKEN="$(openssl rand -hex 32)"
+env -i HOME="$work/home" PATH="$PATH" COPILOT_CONNECTION_TOKEN="$COPILOT_CONNECTION_TOKEN" \
+  "$work/copilot" --headless --port 47839 --no-auto-update --log-level none >/dev/null 2>&1 &
+server=$!
+dotnet run --project /absolute/repository/path/src/CopilotHeadlessFeasibility -- http://127.0.0.1:47839
+kill "$server"
+unset COPILOT_CONNECTION_TOKEN
+rm -rf "$work"
+```
+
+Wait for the server to listen before running the console if startup is slow;
+choose an unused port. Use a protected, random connection token and literal
+loopback only: the connection is not TLS. Do not put credentials in the URL,
+command-line arguments, logs, or source control. For authenticated discovery,
+provide authentication only to the server through its normal sign-in
+mechanism, not to the SDK; the isolated example intentionally has none.
+
 ### WSL container isolation feasibility
 
 Status on 2026-11-12: the controlled fixture and Windows integration checks for

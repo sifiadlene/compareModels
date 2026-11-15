@@ -35,10 +35,16 @@ try
 
     try
     {
+        var auth = await client.GetAuthStatusAsync(timeout.Token);
         var models = await client.ListModelsAsync(timeout.Token);
-        Console.WriteLine($"Model listing: verified ({models.Count})");
-        foreach (var model in models)
-            Console.WriteLine($"{model.Id}\tpolicy={model.Policy?.State.ToString() ?? "unknown"}\tmultiplier={model.Billing?.Multiplier.ToString() ?? "unknown"}");
+        if (!auth.IsAuthenticated)
+            Console.WriteLine("Model listing: unverified (not authenticated).");
+        else
+        {
+            Console.WriteLine($"Model listing: verified ({models.Count})");
+            foreach (var model in models)
+                Console.WriteLine($"{model.Id}\tpolicy={model.Policy?.State.ToString() ?? "unknown"}\tmultiplier={model.Billing?.Multiplier.ToString() ?? "unknown"}");
+        }
     }
     catch (Exception) when (!timeout.IsCancellationRequested)
     {
@@ -72,8 +78,9 @@ try
             }
         }
     }, timeout.Token);
+    await session.Rpc.Tools.InitializeAndValidateAsync(timeout.Token);
     var metadata = await session.Rpc.Tools.GetCurrentMetadataAsync(timeout.Token);
-    Console.WriteLine($"Session tool metadata before inference: {(metadata?.Tools is { Count: > 0 } tools ? string.Join(", ", tools.Select(tool => tool.Name)) : "empty; effective list unverified")}");
+    Console.WriteLine($"Initialized session tools without inference: {(metadata?.Tools is { Count: > 0 } tools ? string.Join(", ", tools.Select(tool => tool.Name)) : "empty; effective list unverified")}");
     Console.WriteLine("No prompt sent. No permission handler configured.");
     return 0;
 }
