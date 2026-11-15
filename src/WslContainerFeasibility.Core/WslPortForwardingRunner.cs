@@ -27,6 +27,9 @@ public sealed class WslPortForwardingRunner
         string storagePath = Path.Combine(localAppData, "compareModels", "Feasibility", "runs", runId);
         var evidence = new ForwardingEvidence { RunId = runId, Windows = Environment.OSVersion.VersionString };
         var containers = new List<Container>();
+        var bridgedOutput = new StringBuilder();
+        var bridgedErrorOutput = new StringBuilder();
+        var bridgedOutputLock = new Lock();
         Session? session = null;
         bool storageCreated = false;
         bool startAttempted = false;
@@ -60,6 +63,20 @@ public sealed class WslPortForwardingRunner
             {
                 bridged = CreateServer(session, ContainerNetworkingMode.Bridged, bridgedPort, $"{runId}-bridged");
                 containers.Add(bridged);
+                bridged.InitProcess.OutputReceived += data =>
+                {
+                    using (bridgedOutputLock.EnterScope())
+                    {
+                        AppendBounded(bridgedOutput, Encoding.UTF8.GetString(data));
+                    }
+                };
+                bridged.InitProcess.ErrorReceived += data =>
+                {
+                    using (bridgedOutputLock.EnterScope())
+                    {
+                        AppendBounded(bridgedErrorOutput, Encoding.UTF8.GetString(data));
+                    }
+                };
                 bridged.Start();
                 evidence.BridgedInspect = Inspect(bridged);
             }
@@ -76,31 +93,45 @@ public sealed class WslPortForwardingRunner
             }
             while (nonePort == bridgedPort);
             evidence.NoneWindowsPort = nonePort;
+            Container? noneServer = null;
             try
             {
-                Container noneServer = CreateServer(session, ContainerNetworkingMode.None, nonePort, $"{runId}-none");
-                containers.Add(noneServer);
-                noneServer.Start();
-                evidence.NoneInspect = Inspect(noneServer);
-                if (evidence.NoneInspect.Value.GetProperty("HostConfig").GetProperty("NetworkMode").GetString() != "none")
-                {
-                    throw new InvalidOperationException("The mapped container was not configured with no network.");
-                }
-                var local = await ProbeContainerAsync(noneServer, "127.0.0.1", $"{runId}-none", cancellationToken);
-                if (local.ExitCode != 0)
-                {
-                    evidence.NoneMapping = "Unverified: listener did not respond inside the container";
-                }
-                else
-                {
-                    evidence.NoneMapping = await WaitForHttpAsync(IPAddress.Loopback, nonePort, $"{runId}-none", cancellationToken)
-                        ? "Reachable" : "Unreachable";
-                }
+                noneServer = CreateServer(session, ContainerNetworkingMode.None, nonePort, $"{runId}-none");
             }
-            catch (Exception exception) when (exception is not OperationCanceledException)
+            catch (ArgumentException exception)
             {
-                evidence.NoneMapping = "Unverified";
-                evidence.NoneMappingError = $"{exception.GetType().Name}: {exception.Message}";
+                evidence.NoneMapping = "Unsupported";
+                evidence.NoneMappingError =
+                    $"WSL Containers does not support port mappings without networking. {exception.Message}";
+            }
+
+            if (noneServer is not null)
+            {
+                containers.Add(noneServer);
+                try
+                {
+                    noneServer.Start();
+                    evidence.NoneInspect = Inspect(noneServer);
+                    if (evidence.NoneInspect.Value.GetProperty("HostConfig").GetProperty("NetworkMode").GetString() != "none")
+                    {
+                        throw new InvalidOperationException("The mapped container was not configured with no network.");
+                    }
+                    var local = await ProbeContainerAsync(noneServer, "127.0.0.1", $"{runId}-none", cancellationToken);
+                    if (local.ExitCode != 0)
+                    {
+                        evidence.NoneMapping = "Unverified: listener did not respond inside the container";
+                    }
+                    else
+                    {
+                        evidence.NoneMapping = await WaitForHttpAsync(IPAddress.Loopback, nonePort, $"{runId}-none", cancellationToken)
+                            ? "Reachable" : "Unreachable";
+                    }
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    evidence.NoneMapping = "Unverified";
+                    evidence.NoneMappingError = $"{exception.GetType().Name}: {exception.Message}";
+                }
             }
 
             if (bridged is null || evidence.BridgedError is not null)
@@ -169,7 +200,9 @@ public sealed class WslPortForwardingRunner
             var positive = await ProbeContainerAsync(networkControl, addressText, $"{runId}-bridged", cancellationToken);
             if (positive.ExitCode != 0)
             {
-                throw new InvalidOperationException("The bridged listener's direct positive control failed.");
+                throw new InvalidOperationException(
+                    $"The bridged listener's direct positive control failed with exit code {positive.ExitCode}: "
+                    + $"{positive.StandardError}{positive.StandardOutput}");
             }
 
             Container isolated = CreateContainer(session, ContainerNetworkingMode.None, ["/bin/sleep", "600"]);
@@ -185,10 +218,12 @@ public sealed class WslPortForwardingRunner
             var positiveAfter = await ProbeContainerAsync(networkControl, addressText, $"{runId}-bridged", cancellationToken);
             if (blocked.ExitCode != 1 || positiveAfter.ExitCode != 0)
             {
-                throw new InvalidOperationException("The no-network control was reachable or could not be verified.");
+                throw new InvalidOperationException(
+                    $"The no-network control was reachable or could not be verified "
+                    + $"(exit code {blocked.ExitCode}: {blocked.StandardOutput}{blocked.StandardError}).");
             }
             evidence.NoNetworkControl = "Passed";
-            if (evidence.NoneMapping is not ("Reachable" or "Unreachable"))
+            if (evidence.NoneMapping is not ("Reachable" or "Unreachable" or "Unsupported"))
             {
                 throw new InvalidOperationException("Mapping behavior with no networking was not verified.");
             }
@@ -209,6 +244,11 @@ public sealed class WslPortForwardingRunner
             {
                 WslFixtureRunner.CaptureCleanupError(evidence.CleanupErrors, "container", () => StopAndDeleteContainer(container));
                 WslFixtureRunner.CaptureCleanupError(evidence.CleanupErrors, "container handle", container.Dispose);
+            }
+            using (bridgedOutputLock.EnterScope())
+            {
+                evidence.BridgedProcessOutput = bridgedOutput.ToString();
+                evidence.BridgedProcessError = bridgedErrorOutput.ToString();
             }
             if (session is not null)
             {
@@ -245,13 +285,30 @@ public sealed class WslPortForwardingRunner
         return new(evidence.Outcome, evidence.Error ?? $"Forwarding probe: {evidence.Outcome}.", path);
     }
 
-    private static Container CreateServer(Session session, ContainerNetworkingMode mode, int windowsPort, string marker) =>
-        CreateContainer(session, mode,
-            ["/bin/sh", "-c", "mkdir -p /www; printf '%s' \"$1\" > /www/index.html; exec /bin/busybox httpd -f -p 0.0.0.0:18080 -h /www", "sh", marker],
+    private static Container CreateServer(Session session, ContainerNetworkingMode mode, int windowsPort, string marker)
+    {
+        string command =
+            """
+            printf '%s' "$1" > /tmp/marker
+            cat > /tmp/serve <<'EOF'
+            #!/bin/sh
+            cr=$(printf '\r')
+            IFS= read -r line || exit 1
+            while IFS= read -r line && [ "${line%$cr}" ]; do :; done
+            marker=$(cat /tmp/marker)
+            printf 'HTTP/1.0 200 OK\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s' "${#marker}" "$marker"
+            EOF
+            chmod +x /tmp/serve
+            while :; do /bin/busybox nc -l -p 18080 -e /tmp/serve; done
+            """;
+
+        return CreateContainer(session, mode,
+            ["/bin/sh", "-c", command.ReplaceLineEndings("\n"), "sh", marker],
             portMappings: [new ContainerPortMapping((ushort)windowsPort, ContainerPort, PortProtocol.TCP)
             {
                 WindowsAddress = new Windows.Networking.HostName("127.0.0.1")
             }]);
+    }
 
     private static JsonElement Inspect(Container container)
     {
@@ -266,6 +323,16 @@ public sealed class WslPortForwardingRunner
         int port = ((IPEndPoint)listener.LocalEndpoint).Port;
         listener.Stop();
         return port;
+    }
+
+    private static void AppendBounded(StringBuilder buffer, string text)
+    {
+        const int maxLength = 4096;
+        int length = Math.Min(text.Length, maxLength - buffer.Length);
+        if (length > 0)
+        {
+            buffer.Append(text, 0, length);
+        }
     }
 
     internal static IPAddress[] GetNonLoopbackAddresses() =>
@@ -343,7 +410,11 @@ public sealed class WslPortForwardingRunner
                 if (!response.StartsWith("HTTP/1.0 200 ", StringComparison.Ordinal)
                     && !response.StartsWith("HTTP/1.1 200 ", StringComparison.Ordinal))
                 {
-                    throw new InvalidOperationException("The port did not return HTTP 200.");
+                    string statusLine = response.Split("\r\n", 2, StringSplitOptions.None)[0];
+                    throw new InvalidOperationException(
+                        string.IsNullOrEmpty(statusLine)
+                            ? "The port returned an empty HTTP response."
+                            : $"The port returned an unexpected HTTP status line: {statusLine}");
                 }
                 if (!response.EndsWith($"\r\n\r\n{marker}", StringComparison.Ordinal))
                 {
@@ -375,20 +446,34 @@ public sealed class WslPortForwardingRunner
         return false;
     }
 
-    private static Task<CommandResult> ProbeContainerAsync(Container container, string address, string marker, CancellationToken cancellationToken) =>
-        WslFixtureRunner.RunProcessAsync(container,
-            ["/bin/sh", "-c",
-                """
-                /bin/busybox --list | grep -Fx wget >/dev/null || exit 73
-                i=0
-                until /bin/busybox wget -T 3 -q -O /tmp/forward-probe "http://$1:18080/"; do
-                    i=$((i + 1))
-                    [ "$i" -lt 3 ] || exit 1
-                    /bin/sleep 1
-                done
-                grep -Fx "$2" /tmp/forward-probe >/dev/null || exit 74
-                """, "sh", address, marker],
-            ProbeTimeout, cancellationToken);
+    private static Task<CommandResult> ProbeContainerAsync(Container container, string address, string marker, CancellationToken cancellationToken)
+    {
+        string command =
+            """
+            /bin/busybox --list | grep -Fx wget >/dev/null || exit 73
+            i=0
+            downloaded=0
+            while [ "$i" -lt 3 ]; do
+                if /bin/busybox wget -T 3 -q -O /tmp/forward-probe "http://$1:18080/"; then
+                    downloaded=1
+                    break
+                fi
+                i=$((i + 1))
+                /bin/sleep 1
+            done
+            [ "$downloaded" -eq 1 ] || exit 1
+            if grep -Fx "$2" /tmp/forward-probe >/dev/null; then
+                exit 0
+            fi
+            cat /tmp/forward-probe
+            exit 74
+            """;
+
+        return WslFixtureRunner.RunProcessAsync(container,
+            ["/bin/sh", "-c", command.ReplaceLineEndings("\n"), "sh", address, marker],
+            ProbeTimeout,
+            cancellationToken);
+    }
 }
 
 internal sealed class ForwardingEvidence
@@ -408,6 +493,8 @@ internal sealed class ForwardingEvidence
     public JsonElement? NoneInspect { get; set; }
     public JsonElement? ControlInspect { get; set; }
     public JsonElement? NetworkControlInspect { get; set; }
+    public string BridgedProcessOutput { get; set; } = string.Empty;
+    public string BridgedProcessError { get; set; } = string.Empty;
     public string? BridgedContainerAddress { get; set; }
     public string[] WindowsListeners { get; set; } = [];
     public string Loopback { get; set; } = "NotRun";

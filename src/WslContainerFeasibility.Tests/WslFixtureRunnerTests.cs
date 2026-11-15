@@ -32,8 +32,12 @@ public sealed class WslFixtureRunnerTests
                 item => Assert.EndsWith(": unreachable", item.GetString()));
             Assert.Equal("Passed", root.GetProperty("noNetworkControl").GetString());
             Assert.Equal(1, root.GetProperty("noNetworkProbeExitCode").GetInt32());
-            Assert.Contains(root.GetProperty("noneMapping").GetString(), new[] { "Reachable", "Unreachable" });
-            foreach (string name in new[] { "bridgedInspect", "noneInspect", "controlInspect", "networkControlInspect" })
+            Assert.Equal("Unsupported", root.GetProperty("noneMapping").GetString());
+            Assert.Contains(
+                "does not support port mappings without networking",
+                root.GetProperty("noneMappingError").GetString(),
+                StringComparison.Ordinal);
+            foreach (string name in new[] { "bridgedInspect", "controlInspect", "networkControlInspect" })
             {
                 var inspect = root.GetProperty(name);
                 Assert.Equal(JsonValueKind.Object, inspect.GetProperty("HostConfig").ValueKind);
