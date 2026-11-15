@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+field() { awk -v name="$1:" '$1 == name { print $2 }' /proc/self/status; }
+uid=$(id -u)
+effective=$(field CapEff)
+bounding=$(field CapBnd)
+inheritable=$(field CapInh)
+ambient=$(field CapAmb)
+nnp=$(field NoNewPrivs)
+printf 'uid=%s CapEff=%s CapBnd=%s CapInh=%s CapAmb=%s NoNewPrivs=%s\n' \
+    "$uid" "$effective" "$bounding" "$inheritable" "$ambient" "$nnp"
+test "$uid" = 1000
+test "$(id -g)" = 1000
+test "$(id -G)" = 1000
+test "$effective" = 0000000000000000
+test "$bounding" = 0000000000000000
+test "$inheritable" = 0000000000000000
+test "$ambient" = 0000000000000000
+test "$nnp" = 1
+echo STATE_OK

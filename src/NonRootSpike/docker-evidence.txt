@@ -1,0 +1,83 @@
+Issue #23 runner evidence, 2026-11-15, Linux x86_64
+Docker client/server: 28.0.4
+Kernel: 7.0.0-1017-azure
+
+Commands (repository root /home/runner/work/compareModels/compareModels):
+docker build --build-arg TASK_PACKAGES='git jq' --tag comparemodels-nonroot-spike /home/runner/work/compareModels/compareModels/src/NonRootSpike
+bash /home/runner/work/compareModels/compareModels/src/NonRootSpike/verify-docker comparemodels-nonroot-spike
+
+Base manifest digest:
+debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
+Resulting local image configuration digest (Docker image ID):
+sha256:2913654fa4b14fd62ce76440440e17586fb1bc53941f981f834ac9adcdb061e0
+RepoDigests: [] (local build, not published; this is NOT a registry manifest digest).
+Saved OCI manifest digest (verified by hashing the manifest blob in docker save):
+sha256:a090e1f63713f38e5d091bfbd8dd07c88a926c06536011f0ae160b730e472f4f
+Archive command: docker save --output /tmp/comparemodels-nonroot-spike.tar comparemodels-nonroot-spike
+Archive SHA-256: 63b07c6d6c7dab027ba5650a4cca7273df50578f712c8d62c2fbc0a02ede3fe0
+The archive uses uncompressed OCI layers; a registry push may recompress them
+and produce a different manifest digest. Record the registry's actual digest.
+The archive is a runner-local build artifact, not committed to this repository.
+Declared Task packages: git jq
+git version 2.39.5
+jq-1.6
+libc6:amd64 2.36-9+deb12u14
+passwd 1:4.13+dfsg1-1+deb12u2
+sudo 1.9.13p3-1+deb12u4
+util-linux 2.38.1-5+deb12u3
+Full resolved package inventory is embedded in the image at /etc/image-packages.
+
+Observed verifier transcript (ephemeral hostname omitted from sudo diagnostic):
+uid=0 CapEff=00000000000001c0 CapBnd=00000000000001c0 CapInh=0000000000000000 CapAmb=0000000000000000 NoNewPrivs=0
+uid=1000 CapEff=0000000000000000 CapBnd=00000000000001c0 CapInh=0000000000000000 CapAmb=0000000000000000 NoNewPrivs=1
+uid=1000 CapEff=0000000000000080 CapBnd=0000000000000000 CapInh=0000000000000080 CapAmb=0000000000000080 NoNewPrivs=1
+NEGATIVE_STATE_CONTROLS_OK
+ruid=1000 euid=0
+sudo: unable to resolve host <ephemeral hostname>: Temporary failure in name resolution
+sudo: unable to send audit message: Operation not permitted
+ESCALATION_CONTROLS_OK
+without SETUID: exit=127 setpriv: setresuid failed: Operation not permitted
+without SETGID: exit=127 setpriv: setresgid failed: Operation not permitted
+without SETPCAP: exit=1 uid=1000 CapEff=0000000000000000 CapBnd=00000000000000c0 CapInh=0000000000000000 CapAmb=0000000000000000 NoNewPrivs=1
+MINIMAL_CAPABILITIES_OK
+uid=1000 CapEff=0000000000000000 CapBnd=0000000000000000 CapInh=0000000000000000 CapAmb=0000000000000000 NoNewPrivs=1
+STATE_OK
+su: cannot set groups: Operation not permitted
+sudo: The "no new privileges" flag is set, which prevents sudo from running as root.
+sudo: If sudo is running in a container, you may need to adjust the container configuration to disable the flag.
+ruid=1000 euid=1000
+ESCALATION_BLOCKED
+workspace uid=1000 gid=1000 mode=770
+/workspace/agent uid=1000 gid=1000 mode=660
+PROBE_OK=agent
+uid=1000 CapEff=0000000000000000 CapBnd=0000000000000000 CapInh=0000000000000000 CapAmb=0000000000000000 NoNewPrivs=1
+STATE_OK
+su: cannot set groups: Operation not permitted
+sudo: The "no new privileges" flag is set, which prevents sudo from running as root.
+sudo: If sudo is running in a container, you may need to adjust the container configuration to disable the flag.
+ruid=1000 euid=1000
+ESCALATION_BLOCKED
+workspace uid=1000 gid=1000 mode=770
+/workspace/executor uid=1000 gid=1000 mode=660
+PROBE_OK=executor
+SHARED_WORKSPACE_OK
+DOCKER_SPIKE_OK
+
+Exit status: 0. No privileged mode or custom seccomp profile used.
+The unsafe setuid executable reported euid=0. The unsafe su and sudo
+controls each returned id -u = 0 (asserted by the verifier).
+The protected su control uses permissive test PAM, so authentication cannot
+mask a privilege-drop failure. Root remains locked; no password is supplied.
+Docker does not set no-new-privileges at creation in this verifier; the
+in-container wrapper alone must set it, matching the WSL mechanism.
+Windows/WSL execution and ContainerVolume ownership: NOT RUN on this runner.
+
+Additional validation:
+- Building with TASK_PACKAGES='' succeeded. /etc/task-packages was empty,
+  neither git nor jq was available: EMPTY_TASK_PACKAGES_OK.
+- dotnet build of the existing Windows test project with the new integration
+  test: succeeded, 0 warnings, 0 errors against Microsoft.WSL.Containers 3.0.5.
+- Targeted dotnet test on Linux failed before executing the test body:
+  DllNotFoundException loading wslcsdk.dll. This is not a WSL control result.
+- Docker inspect reported Privileged=false, CapDrop=["ALL"],
+  CapAdd=["CAP_SETGID","CAP_SETPCAP","CAP_SETUID"].
