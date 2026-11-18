@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <WindowsSdkPackageVersion>10.0.26100.80</WindowsSdkPackageVersion>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <CopilotSkipCliDownload>true</CopilotSkipCliDownload>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- SessionConfig.OnPermissionRequest requires the evaluation-only Rpc.PermissionDecision type in SDK 1.0.34. -->
+    <NoWarn>$(NoWarn);GHCP001</NoWarn>
+    <MailboxProject>$(MSBuildThisFileDirectory)../IsolatedCopilotRun.Mailbox/IsolatedCopilotRun.Mailbox.csproj</MailboxProject>
+    <MailboxPublishDir>$(BaseIntermediateOutputPath)mailbox/</MailboxPublishDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="GitHub.Copilot.SDK" Version="1.0.34" />
+    <ProjectReference Include="../WslContainerFeasibility.Core/WslContainerFeasibility.Core.csproj" />
+    <None Include="images/**" CopyToOutputDirectory="PreserveNewest" LinkBase="images" />
+    <None Include="tasks/**" CopyToOutputDirectory="PreserveNewest" LinkBase="tasks" />
+    <MailboxSource Include="../IsolatedCopilotRun.Mailbox/*.cs;$(MailboxProject)" />
+  </ItemGroup>
+
+  <!-- The mailbox MCP server runs inside the Linux agent container. -->
+  <Target Name="PublishMailbox" BeforeTargets="Build" Inputs="@(MailboxSource)" Outputs="$(MailboxPublishDir)mailbox-mcp">
+    <Exec Command="dotnet publish &quot;$(MailboxProject)&quot; -c Release -r linux-x64 --self-contained -p:PublishSingleFile=true -p:PublishTrimmed=true -o &quot;$(MailboxPublishDir)&quot;" />
+  </Target>
+
+  <Target Name="CopyMailbox" AfterTargets="Build">
+    <Copy SourceFiles="$(MailboxPublishDir)mailbox-mcp" DestinationFolder="$(OutDir)images" SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

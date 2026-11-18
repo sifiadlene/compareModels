@@ -1,0 +1,17 @@
+#!/bin/sh
+# Reads the GitHub token and connection token from stdin so neither appears in
+# container configuration, Inspect() output or the process command line.
+set -eu
+IFS= read -r COPILOT_GITHUB_TOKEN
+IFS= read -r COPILOT_CONNECTION_TOKEN
+if [ -n "$COPILOT_GITHUB_TOKEN" ]; then
+    export COPILOT_GITHUB_TOKEN
+else
+    unset COPILOT_GITHUB_TOKEN
+fi
+export COPILOT_CONNECTION_TOKEN
+export HOME=/home/workload COPILOT_HOME=/home/workload/.copilot COPILOT_AUTO_UPDATE=false
+cd /workspace
+exec /opt/copilot/copilot --headless --port 3000 --no-auto-update --log-level none \
+    --disable-builtin-mcps --disallow-temp-dir --no-custom-instructions --disable-client-telemetry \
+    --secret-env-vars=COPILOT_GITHUB_TOKEN,COPILOT_CONNECTION_TOKEN </dev/null

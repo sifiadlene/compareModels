@@ -610,3 +610,26 @@ Run only controlled feasibility tests while isolation for arbitrary coding
 Tasks remains unverified; do not treat passing canary tests as proof against
 every possible escape. If a required guarantee fails or cannot be demonstrated,
 stop and record the specific blocker rather than using an unsandboxed fallback.
+
+### Isolated Copilot Run proof
+
+Status on 2026-11-17: `src/IsolatedCopilotRun` implements and completed one
+explicitly confirmed `slugify` Task using separate WSL agent and executor
+sessions, a host-relayed mailbox, and protected Evaluation. The synthetic
+isolation gate and live preflight each passed 16/16 controls on the local
+Windows/WSL environment. The focused suite passed 26/26 tests.
+
+The approved Run used GPT-6.1 Terra, completed in 55 seconds with six model
+calls, and produced an 845-byte patch. All five protected acceptance tests
+passed in a fresh network-isolated Evaluation container. The final evidence
+records token-free executor isolation, available usage events, model identity,
+image and runtime identity, and successful cleanup; the evidence secret scan
+was clean. It is retained locally under
+`%LOCALAPPDATA%\compareModels\IsolatedRuns\20261117-205144-run-5b691095\evidence`
+and is not committed because it contains task and session details.
+
+The CLI exposes different safe file-tool names for different model strategies.
+The host allowlists the union of supported workspace tools, while the gate
+requires the selected model's exact initialized tool set and rejects shell,
+web, and sub-agent tools. Do not treat this bounded proof as evidence of
+resistance to deliberate container escapes or the safety of arbitrary Tasks.

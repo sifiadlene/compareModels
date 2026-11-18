@@ -1,0 +1,7 @@
+{
+  "id": "slugify",
+  "packages": "python3",
+  "network": "blocked",
+  "checkCommand": "python3 -m unittest discover -s checks -v",
+  "runTimeoutMinutes": 20
+}
