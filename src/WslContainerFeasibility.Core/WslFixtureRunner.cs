@@ -13,7 +13,7 @@ namespace WslContainerFeasibility;
 /// <summary>Runs a fixed, non-sensitive fixture after verifying container boundaries.</summary>
 public sealed class WslFixtureRunner
 {
-    private const string ApiPackageVersion = "3.0.5";
+    internal const string ApiPackageVersion = "3.0.5";
     private const string FixtureScript = """
         set -eu
         total="$(awk '{ total += $1 } END { print total }' /workspace/input.txt)"
@@ -659,7 +659,7 @@ public sealed class WslFixtureRunner
         }
     }
 
-    private static async Task<string> ReadWslVersionAsync(CancellationToken cancellationToken)
+    internal static async Task<string> ReadWslVersionAsync(CancellationToken cancellationToken)
     {
         var startInfo = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "wsl.exe"))
         {

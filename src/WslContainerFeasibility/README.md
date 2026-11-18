@@ -47,6 +47,71 @@ dotnet build src/WslContainerFeasibility.WinUI/WslContainerFeasibility.WinUI.csp
 Select **Check prerequisites**, then **Run fixture**. The run repeats the
 prerequisite check even if it was not selected separately.
 
+## Isolated Copilot Run
+
+`src/IsolatedCopilotRun` implements the bounded `slugify` Task separately from
+the WinUI fixture. Use x64 Windows, .NET 10, Git, and WSL Containers 3.0.5 with
+`wslc` installed under `%ProgramFiles%\WSL`. Image preparation downloads the
+SHA-256-verified Copilot CLI 1.0.112 and builds digest-pinned Debian images
+with `wslc build`; Docker Desktop is not required.
+
+The agent and executor use separate WSL sessions. The agent holds the Copilot
+token and has bridged inference networking. The executor receives no token,
+CLI, or mailbox mount; it shares only `/workspace` with the agent. A trusted
+mailbox MCP server sends commands to a host relay, which starts them in the
+executor as UID/GID 1000 with no workload capabilities and `no_new_privs`.
+Evaluation restores trusted checks in a fresh, token-free container with no
+network, after stopping the agent and executor.
+
+Run the synthetic-token isolation gate without authentication or inference:
+
+```powershell
+dotnet run --project .\src\IsolatedCopilotRun\IsolatedCopilotRun.csproj -- gate
+dotnet test .\src\IsolatedCopilotRun.Tests\IsolatedCopilotRun.Tests.csproj
+```
+
+For a live Run, create a fine-grained token with only **Copilot Requests**
+permission. Do not paste it into chat, source files, command history, or a
+cloud Copilot environment. Run this from the repository root in an interactive
+PowerShell terminal; the hidden prompt reads it into process-local memory:
+
+```powershell
+$secret = Read-Host 'Copilot token (input hidden)' -AsSecureString
+try {
+    $env:COPILOT_GITHUB_TOKEN = [System.Net.NetworkCredential]::new('', $secret).Password
+    $env:COMPAREMODELS_LIVE_RUN = '1'
+    dotnet run --project .\src\IsolatedCopilotRun\IsolatedCopilotRun.csproj -- run --model gpt-6.1-terra
+}
+finally {
+    Remove-Item Env:\COPILOT_GITHUB_TOKEN, Env:\COMPAREMODELS_LIVE_RUN -ErrorAction SilentlyContinue
+    $secret.Dispose()
+}
+```
+
+The harness discovers available Model strategies without substitution and
+requires both the synthetic gate and live preflight to pass. Type `RUN` only
+at the subsequent billable-work confirmation. One Run can make multiple
+model calls; its timeout is not a monetary cap. Use Ctrl+C to cancel. No Run
+is retried automatically and no changes are published.
+
+Task definitions under `src/IsolatedCopilotRun/tasks` contain the prompt,
+starting workspace, trusted checks, package list, network policy (`blocked`
+or explicitly `unrestricted`), and timeout. Pass `--task <directory>` to
+choose another trusted local definition. Linux tools are installed at image
+build time through the Task's package list, never on Run startup. Package
+repositories can change, so the manifest records built image IDs and tar
+hashes as well as pinned CLI/SDK/WSL versions.
+
+Evidence remains under `%LOCALAPPDATA%\compareModels\IsolatedRuns\<run-id>\evidence`:
+the model catalog, gate/preflight reports, events, permission decisions, relay
+log, patch, separate Evaluation result, usage, terminal outcome, and cleanup.
+Missing telemetry remains unknown; reported multiplier cost is not currency.
+The token is supplied to the CLI through stdin and removed from MCP child
+environments. Evidence writes reject registered token values, but logs and
+patches can still contain sensitive Task content; do not upload them blindly.
+These controlled proofs do not establish resistance to deliberate container
+escapes or the safety of arbitrary untrusted Tasks.
+
 ## Run Windows integration tests
 
 From PowerShell on Windows with WSL Containers available:
