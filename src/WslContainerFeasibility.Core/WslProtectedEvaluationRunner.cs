@@ -55,8 +55,15 @@ public sealed class WslProtectedEvaluationRunner
         #!/bin/sh
         set -u
         printf 'CHECK_STARTED\n'
+        ulimit -f 256 || { printf 'SETUP_FAILED=ulimit\n'; exit 125; }
+        [ -r /workspace/sample.sh ] || { printf 'SETUP_FAILED=sample\n'; exit 125; }
+        [ -w /run/comparemodels-evaluation ] || { printf 'SETUP_FAILED=output-directory\n'; exit 125; }
+        exec 3>/run/comparemodels-evaluation/actual || { printf 'SETUP_FAILED=output-redirection\n'; exit 125; }
+        /usr/bin/setpriv --reuid=65534 --regid=65534 --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+            /bin/sh -c ':' || { printf 'SETUP_FAILED=setpriv\n'; exit 125; }
+        printf 'SETUP_READY\n'
         (
-            ulimit -f 256 || exit 125
             exec /usr/bin/setpriv --reuid=65534 --regid=65534 --clear-groups \
                 --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
                 /bin/sh /workspace/sample.sh
@@ -65,13 +72,22 @@ public sealed class WslProtectedEvaluationRunner
         printf 'subject_exit=%s\n' "$subject_status"
         printf 'subject_output:\n'
         /bin/sed 's/^/  /' /run/comparemodels-evaluation/actual
-        if [ "$subject_status" -eq 0 ] && /usr/bin/cmp -s \
-            /run/comparemodels-evaluation/expected /run/comparemodels-evaluation/actual; then
+        if [ "$subject_status" -ne 0 ]; then
+            printf 'CHECK_FAILED\n'
+            exit 1
+        fi
+        /usr/bin/cmp -s /run/comparemodels-evaluation/expected /run/comparemodels-evaluation/actual
+        cmp_status=$?
+        if [ "$cmp_status" -eq 0 ]; then
             printf 'CHECK_PASSED\n'
             exit 0
         fi
-        printf 'CHECK_FAILED\n'
-        exit 1
+        if [ "$cmp_status" -eq 1 ]; then
+            printf 'CHECK_FAILED\n'
+            exit 1
+        fi
+        printf 'COMPARISON_FAILED=status_%s\n' "$cmp_status"
+        exit 125
         """;
 
     private const string PrivilegeProbe = """
@@ -485,7 +501,13 @@ public sealed class WslProtectedEvaluationRunner
                     evidence.OutputTruncated = output.Truncated || error.Truncated;
                     evidence.CheckStarted = evidence.CheckStandardOutput
                         .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                        .FirstOrDefault() == "CHECK_STARTED";
+                        .Contains("CHECK_STARTED", StringComparer.Ordinal);
+                    evidence.CheckSetupReady = evidence.CheckStandardOutput
+                        .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                        .Contains("SETUP_READY", StringComparer.Ordinal);
+                    evidence.CheckComparisonStatus = evidence.CheckStandardOutput
+                        .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                        .FirstOrDefault(line => line.StartsWith("COMPARISON_FAILED=", StringComparison.Ordinal));
                 }
 
                 evidence.CheckExitCode = execution.ExitCode;
@@ -493,7 +515,12 @@ public sealed class WslProtectedEvaluationRunner
                 {
                     ExecutionEnd.Cancelled => EvaluationOutcome.Cancelled,
                     ExecutionEnd.TimedOut => EvaluationOutcome.TimedOut,
-                    _ when !evidence.CheckStarted => EvaluationOutcome.InfrastructureFailure,
+                    _ when !evidence.CheckStarted || !evidence.CheckSetupReady
+                        => EvaluationOutcome.InfrastructureFailure,
+                    _ when evidence.CheckComparisonStatus is not null
+                        => EvaluationOutcome.InfrastructureFailure,
+                    _ when execution.ExitCode == 125
+                        => EvaluationOutcome.InfrastructureFailure,
                     _ when execution.ExitCode == 0 => EvaluationOutcome.Passed,
                     _ when execution.ExitCode == 1 => EvaluationOutcome.Failed,
                     _ => EvaluationOutcome.InfrastructureFailure
@@ -588,7 +615,7 @@ public sealed class WslProtectedEvaluationRunner
                 }
             }
 
-            evidence.CompletedUtc = DateTimeOffset.UtcNow;
+            evidence.CleanupState = "Pending";
             try
             {
                 evidencePath = await WslFixtureRunner.SaveEvidenceAsync(localAppData, runId, evidence);
@@ -647,6 +674,7 @@ public sealed class WslProtectedEvaluationRunner
         {
             evidence.Outcome = EvaluationOutcome.InfrastructureFailure;
         }
+        evidence.CleanupState = evidence.CleanupErrors.Count == 0 ? "Complete" : "Failed";
         evidence.CompletedUtc = DateTimeOffset.UtcNow;
         try
         {
@@ -655,9 +683,15 @@ public sealed class WslProtectedEvaluationRunner
         }
         catch (Exception exception)
         {
+            evidence.PersistenceErrors.Add($"Final save: {exception.Message}");
+            evidence.Outcome = EvaluationOutcome.InfrastructureFailure;
+            string cleanupDetails = evidence.CleanupErrors.Count == 0
+                ? "cleanup: complete"
+                : $"cleanup: {string.Join("; ", evidence.CleanupErrors)}";
             throw new IOException(
                 $"Could not persist final Evaluation evidence; pre-cleanup evidence: {evidencePath ?? "unavailable"}; " +
-                $"project artifact directory: {artifactDirectory}.",
+                $"project artifact directory: {artifactDirectory}; {cleanupDetails}; " +
+                $"persistence: {string.Join("; ", evidence.PersistenceErrors)}.",
                 exception);
         }
 
@@ -936,7 +970,7 @@ internal sealed class ProtectedEvaluationEvidence
 {
     public string RunId { get; init; } = string.Empty;
     public DateTimeOffset StartedUtc { get; init; }
-    public DateTimeOffset CompletedUtc { get; set; }
+    public DateTimeOffset? CompletedUtc { get; set; }
     public EvaluationSample Sample { get; init; }
     public int SessionCpuCount { get; init; }
     public int SessionMemorySizeInMb { get; init; }
@@ -971,6 +1005,8 @@ internal sealed class ProtectedEvaluationEvidence
     public string CheckIntegrityBefore { get; set; } = "NotRun";
     public string CheckIntegrityAfter { get; set; } = "NotRun";
     public bool CheckStarted { get; set; }
+    public bool CheckSetupReady { get; set; }
+    public string? CheckComparisonStatus { get; set; }
     public int? CheckExitCode { get; set; }
     public string? CheckStandardOutput { get; set; }
     public string? CheckStandardError { get; set; }
@@ -982,6 +1018,7 @@ internal sealed class ProtectedEvaluationEvidence
     public string? Error { get; set; }
     public string? CaptureError { get; set; }
     public string? ProjectArchivePath { get; set; }
+    public string CleanupState { get; set; } = "Pending";
     public List<string> CleanupErrors { get; set; } = [];
     public List<string> PersistenceErrors { get; set; } = [];
 }

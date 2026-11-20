@@ -302,7 +302,7 @@ public sealed class WslFixtureRunner
         FixtureEvidence evidence,
         CancellationToken cancellationToken,
         string expectedImage = ImageReference,
-        Func<string, int, string[]>? blockedNetworkProbe = null)
+        Func<string, int, string[]>? networkProbe = null)
     {
         using (var inspect = JsonDocument.Parse(container.Inspect()))
         {
@@ -443,25 +443,27 @@ public sealed class WslFixtureRunner
                 throw new BoundaryException("The synthetic file-canary positive control failed.");
             }
 
+            var resolveAddress = await RunProcessAsync(
+                control,
+                ["/bin/sh", "-c", "getent hosts host.wslc.internal | awk '$1 ~ /^[0-9.]+$/ { print $1; exit }'"],
+                ProbeTimeout,
+                cancellationToken);
+            string hostAddress = resolveAddress.StandardOutput.Trim();
+            if (resolveAddress.ExitCode != 0
+                || !IPAddress.TryParse(hostAddress, out var address)
+                || address.AddressFamily != AddressFamily.InterNetwork)
+            {
+                evidence.NetworkControl = "Failed";
+                throw new BoundaryException("The bridged control could not resolve a valid IPv4 endpoint address.");
+            }
+
             var positiveRequest = endpoint.WaitForRequestAsync(TimeSpan.FromSeconds(10));
             var positive = await RunProcessAsync(
                 control,
-                [
-                    "/bin/sh",
-                    "-c",
-                    """
-                    ip="$(getent hosts host.wslc.internal | awk '$1 ~ /^[0-9.]+$/ { print $1; exit }')"
-                    [ -n "$ip" ] || exit 71
-                    printf 'PROBE_IP=%s\n' "$ip"
-                    /bin/busybox wget -T 3 -q -O /dev/null "http://$ip:$1/probe" || exit 72
-                    printf 'PROBE_DONE\n'
-                    """,
-                    "sh",
-                    endpoint.Port.ToString()
-                ],
+                networkProbe?.Invoke(hostAddress, endpoint.Port)
+                    ?? ["/bin/busybox", "wget", "-T", "3", "-q", "-O", "/dev/null", $"http://{hostAddress}:{endpoint.Port}/probe"],
                 ProbeTimeout,
-                cancellationToken,
-                requiredMarker: "PROBE_DONE");
+                cancellationToken);
             evidence.NetworkControlExitCode = positive.ExitCode;
             evidence.NetworkControlOutput = positive.StandardOutput;
             evidence.NetworkControlError = positive.StandardError;
@@ -473,22 +475,12 @@ public sealed class WslFixtureRunner
                     $"stdout: {positive.StandardOutput}; stderr: {positive.StandardError}).");
             }
 
-            string? addressLine = positive.StandardOutput.Split('\n')
-                .FirstOrDefault(line => line.StartsWith("PROBE_IP=", StringComparison.Ordinal));
-            string hostAddress = addressLine?["PROBE_IP=".Length..].Trim() ?? string.Empty;
-            if (!IPAddress.TryParse(hostAddress, out var address)
-                || address.AddressFamily != AddressFamily.InterNetwork)
-            {
-                evidence.NetworkControl = "Failed";
-                throw new BoundaryException("The bridged control did not report a valid IPv4 endpoint address.");
-            }
-
             evidence.NetworkControl = "Passed";
 
             var blockedRequest = endpoint.WaitForRequestAsync(TimeSpan.FromSeconds(2));
             var blocked = await RunProcessAsync(
                 options.UseControlForBlockedProbe ? control : container,
-                blockedNetworkProbe?.Invoke(hostAddress, endpoint.Port)
+                networkProbe?.Invoke(hostAddress, endpoint.Port)
                     ?? ["/bin/busybox", "wget", "-T", "3", "-q", "-O", "/dev/null", $"http://{hostAddress}:{endpoint.Port}/probe"],
                 ProbeTimeout,
                 cancellationToken);

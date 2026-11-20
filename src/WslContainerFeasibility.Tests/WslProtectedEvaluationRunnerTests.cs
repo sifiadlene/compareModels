@@ -56,6 +56,7 @@ public sealed class WslProtectedEvaluationRunnerTests
                     Assert.Contains(marker, protectionOutput);
                 }
                 Assert.True(root.GetProperty("checkStarted").GetBoolean());
+                Assert.True(root.GetProperty("checkSetupReady").GetBoolean());
                 Assert.Equal(0, root.GetProperty("checkPreflightExitCode").GetInt32());
                 Assert.Equal(0, root.GetProperty("checkExitCode").GetInt32());
                 Assert.Contains("CHECK_PASSED", root.GetProperty("checkStandardOutput").GetString());
@@ -78,6 +79,7 @@ public sealed class WslProtectedEvaluationRunnerTests
                 Assert.False(string.IsNullOrWhiteSpace(boundaries.GetProperty("linuxKernel").GetString()));
                 Assert.Empty(root.GetProperty("cleanupErrors").EnumerateArray());
                 Assert.Empty(root.GetProperty("persistenceErrors").EnumerateArray());
+                Assert.Equal("Complete", root.GetProperty("cleanupState").GetString());
                 Assert.Contains("printf '42", ReadProjectFile(result, "workspace/sample.sh"));
 
                 Assert.Equal(ContainerState.Running, control.State);
