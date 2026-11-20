@@ -3,7 +3,7 @@
 `compareModels` is an early-stage Windows project for comparing coding-agent
 configurations. The repository currently contains feasibility experiments, not
 the full comparison application: there is no Task/Run comparison workflow, model
-configuration UI, evaluator, or results database.
+configuration UI, production evaluator, or results database.
 
 Start with the [project overview](docs/project-overview.md) for the implemented
 components, architecture, technology stack, and verification boundaries. The

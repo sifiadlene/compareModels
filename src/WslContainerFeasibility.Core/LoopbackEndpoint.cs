@@ -24,10 +24,27 @@ internal sealed class LoopbackEndpoint : IDisposable
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(
             timeoutCancellation.Token,
             _stopToken);
+        bool accepted = false;
         try
         {
             using var client = await _listener.AcceptTcpClientAsync(cancellation.Token);
+            accepted = true;
             NetworkStream stream = client.GetStream();
+            byte[] request = new byte[8192];
+            int length = 0;
+            while (length < request.Length)
+            {
+                int received = await stream.ReadAsync(request.AsMemory(length), cancellation.Token);
+                if (received == 0)
+                {
+                    return true;
+                }
+                length += received;
+                if (request.AsSpan(0, length).IndexOf("\r\n\r\n"u8) >= 0)
+                {
+                    break;
+                }
+            }
             byte[] response = Encoding.ASCII.GetBytes(
                 "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK");
             await stream.WriteAsync(response, cancellation.Token);
@@ -35,11 +52,11 @@ internal sealed class LoopbackEndpoint : IDisposable
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
-            return false;
+            return accepted;
         }
         catch (SocketException) when (_stopToken.IsCancellationRequested)
         {
-            return false;
+            return accepted;
         }
     }
 

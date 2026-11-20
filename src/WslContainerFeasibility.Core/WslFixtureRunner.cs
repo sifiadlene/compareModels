@@ -292,7 +292,7 @@ public sealed class WslFixtureRunner
         return new(evidence.Outcome, summary, evidencePath);
     }
 
-    private static async Task VerifyBoundariesAsync(
+    internal static async Task VerifyBoundariesAsync(
         Session session,
         Container container,
         string hostCanary,
@@ -300,7 +300,9 @@ public sealed class WslFixtureRunner
         string credentialVariable,
         RunnerTestOptions options,
         FixtureEvidence evidence,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string expectedImage = ImageReference,
+        Func<string, int, string[]>? blockedNetworkProbe = null)
     {
         using (var inspect = JsonDocument.Parse(container.Inspect()))
         {
@@ -311,7 +313,7 @@ public sealed class WslFixtureRunner
             string? configuredImage = root.GetProperty("Config").GetProperty("Image").GetString();
             evidence.ImageId = root.GetProperty("Image").GetString();
             evidence.ContainerNetworkMode = mode;
-            if (mode != "none" || mounts != 0 || configuredImage != ImageReference
+            if (mode != "none" || mounts != 0 || configuredImage != expectedImage
                 || string.IsNullOrWhiteSpace(evidence.ImageId))
             {
                 evidence.ContainerConfiguration = "Failed";
@@ -460,10 +462,15 @@ public sealed class WslFixtureRunner
                 ProbeTimeout,
                 cancellationToken,
                 requiredMarker: "PROBE_DONE");
+            evidence.NetworkControlExitCode = positive.ExitCode;
+            evidence.NetworkControlOutput = positive.StandardOutput;
+            evidence.NetworkControlError = positive.StandardError;
             if (positive.ExitCode != 0 || !await positiveRequest)
             {
                 evidence.NetworkControl = "Failed";
-                throw new BoundaryException("The bridged control could not reach the synthetic endpoint.");
+                throw new BoundaryException(
+                    $"The bridged control could not reach the synthetic endpoint (exit {positive.ExitCode}; " +
+                    $"stdout: {positive.StandardOutput}; stderr: {positive.StandardError}).");
             }
 
             string? addressLine = positive.StandardOutput.Split('\n')
@@ -481,7 +488,8 @@ public sealed class WslFixtureRunner
             var blockedRequest = endpoint.WaitForRequestAsync(TimeSpan.FromSeconds(2));
             var blocked = await RunProcessAsync(
                 options.UseControlForBlockedProbe ? control : container,
-                ["/bin/busybox", "wget", "-T", "3", "-q", "-O", "/dev/null", $"http://{hostAddress}:{endpoint.Port}/probe"],
+                blockedNetworkProbe?.Invoke(hostAddress, endpoint.Port)
+                    ?? ["/bin/busybox", "wget", "-T", "3", "-q", "-O", "/dev/null", $"http://{hostAddress}:{endpoint.Port}/probe"],
                 ProbeTimeout,
                 cancellationToken);
             bool endpointReached = await blockedRequest;
@@ -637,11 +645,14 @@ public sealed class WslFixtureRunner
         """
     ];
 
-    internal static async Task PullImageAsync(Session session, CancellationToken cancellationToken)
+    internal static Task PullImageAsync(Session session, CancellationToken cancellationToken) =>
+        PullImageAsync(session, ImageReference, cancellationToken);
+
+    internal static async Task PullImageAsync(Session session, string imageReference, CancellationToken cancellationToken)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
-        var pull = session.PullImageAsync(new PullImageOptions(ImageReference));
+        var pull = session.PullImageAsync(new PullImageOptions(imageReference));
         using var registration = linked.Token.Register(pull.Cancel);
         try
         {
@@ -659,7 +670,7 @@ public sealed class WslFixtureRunner
         }
     }
 
-    private static async Task<string> ReadWslVersionAsync(CancellationToken cancellationToken)
+    internal static async Task<string> ReadWslVersionAsync(CancellationToken cancellationToken)
     {
         var startInfo = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "wsl.exe"))
         {
@@ -707,7 +718,8 @@ public sealed class WslFixtureRunner
         return version;
     }
 
-    internal static async Task<string> SaveEvidenceAsync<T>(string localAppData, string runId, T evidence)
+    internal static async Task<string> SaveEvidenceAsync<T>(
+        string localAppData, string runId, T evidence, bool replaceExisting = false)
     {
         string directory = Path.Combine(localAppData, "compareModels", "Feasibility", "Evidence");
         Directory.CreateDirectory(directory);
@@ -722,7 +734,7 @@ public sealed class WslFixtureRunner
         try
         {
             await File.WriteAllTextAsync(temporaryPath, JsonSerializer.Serialize(evidence, jsonOptions));
-            File.Move(temporaryPath, path);
+            File.Move(temporaryPath, path, replaceExisting);
         }
         catch (IOException exception)
         {
@@ -792,6 +804,9 @@ internal sealed class FixtureEvidence
     public string CredentialFileControl { get; set; } = "NotRun";
     public string CredentialEnvironmentCanary { get; set; } = "NotRun";
     public string NetworkControl { get; set; } = "NotRun";
+    public int? NetworkControlExitCode { get; set; }
+    public string? NetworkControlOutput { get; set; }
+    public string? NetworkControlError { get; set; }
     public string BlockedNetwork { get; set; } = "NotRun";
     public bool FixtureStarted { get; set; }
     public int? FixtureExitCode { get; set; }
