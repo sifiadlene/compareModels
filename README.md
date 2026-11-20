@@ -3,8 +3,8 @@
 `compareModels` is an early-stage Windows project for comparing coding-agent
 configurations. The repository currently contains feasibility experiments, not
 the full comparison application. A bounded isolated Copilot Run and protected
-Evaluation are implemented, but there is no repeated-Run comparison workflow,
-model configuration UI, or results database.
+Evaluation spike are implemented, but there is no Task/Run comparison workflow,
+model configuration UI, production evaluator, or results database.
 
 Start with the [project overview](docs/project-overview.md) for the implemented
 components, architecture, technology stack, and verification boundaries. The

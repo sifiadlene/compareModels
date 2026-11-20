@@ -128,6 +128,80 @@ another session. Descendant-stop tests mount only a synthetic temporary
 heartbeat directory and use the same process-stop path as the fixture runner.
 These tests pull the pinned image and save local evidence.
 
+### Protected Evaluation spike (#30)
+
+This console-only spike evaluates fixed synthetic changes, not a user project
+or a live agent. It requires the **3.0.5** WSL container service, .NET 10,
+the WSL CLI, and access to the pinned public Alpine and Debian images:
+
+```powershell
+dotnet run --project .\src\WslContainerFeasibility\WslContainerFeasibility.csproj -- --protected-evaluation correct
+dotnet run --project .\src\WslContainerFeasibility\WslContainerFeasibility.csproj -- --protected-evaluation incorrect
+dotnet run --project .\src\WslContainerFeasibility\WslContainerFeasibility.csproj -- --protected-evaluation tampered
+dotnet test .\src\WslContainerFeasibility.Tests\WslContainerFeasibility.Tests.csproj --filter "FullyQualifiedName~WslProtectedEvaluationRunnerTests"
+```
+
+`correct` is expected to pass; `incorrect` and `tampered` are expected to
+fail and therefore return a nonzero process exit. The latter replaces the
+workspace check and report, attempts direct, symlink, parent-directory and
+parent-output writes, and emits a forged pass. The result is the separately
+provisioned, root-owned check's exit status, not the workspace check, report,
+or sample output. Its identity, permissions and expected output are verified
+outside the writable workspace. The sample runs as UID/GID 65534 with no
+effective, bounding, inheritable or ambient capabilities and with
+`NoNewPrivs=1`; an unsafe privilege-drop control must be rejected.
+
+The evaluator has no network or host mounts and runs only after the existing
+host-file, synthetic credential and network controls pass. As in the #23
+test, a version-pinned **debug-only** same-session daemon inspection must
+confirm the exact container is non-privileged. The SDK's `Privileged` setting
+alone is insufficient; an unavailable or mismatched inspection blocks the
+spike. Workspace capture also uses this unsupported same-session debugging
+interface against the stopped container. It is not a production API.
+
+Evidence JSON records runtime and image identities, controls, check output,
+the separate Evaluation limit and elapsed time, terminal outcome, and
+capture/cleanup errors. It is written under
+`%LOCALAPPDATA%\compareModels\Feasibility\Evidence`; the retained
+`workspace.tar` is under
+`%LOCALAPPDATA%\compareModels\Feasibility\ProtectedEvaluation\<run-id>`.
+The archive is untrusted and may contain symlinks; inspect it rather than
+extracting it into a sensitive directory. Timeout and cancellation stop the
+container before its filesystem is copied. The tests observe a running
+descendant before stopping and verify that it is no longer running afterward.
+Cancellation is exercised through the runner's cancellation token; the
+console harness does not wire Ctrl+C to that token, and abrupt termination
+and crash recovery are not verified.
+
+WSL 3.0.5 can report exit 126 for a nonexistent executable instead of failing
+process creation. The spike checks the trusted command's executability before
+launch and records `Unrunnable` separately from an executed failed check;
+unexpected runtime failures are not treated as check failures. No unsandboxed
+fallback is used, and these synthetic controls do not establish resistance to
+malicious container escapes or readiness for real user projects.
+
+#### Observed Windows evidence
+
+The integration controls ran on Windows `10.0.26300.9974`, WSL `3.0.5.0`
+(kernel `6.18.58.1-1`), WSL container service/package `3.0.5`, and .NET
+runtime `10.0.15`. The evaluator used
+`docker.io/library/debian@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc`;
+the observed image ID was
+`sha256:43f84a0b210f98845ef003912981774c95efe439eaa4b1cb62cf803fd46fc82a`.
+
+| Control | Observed outcome |
+| --- | --- |
+| Correct and incorrect changes | The protected check passed the correct change and failed the incorrect change. |
+| Workspace tampering | Writable-file, symlink and rename controls succeeded in the workspace; direct, symlink and parent-directory changes to the check and writes to its parent output were denied. Replacing the workspace check/report and printing a forged pass did not change the failure, and the protected-check hash remained unchanged. |
+| Isolation and unsafe controls | The host-file, synthetic credential and network controls passed. Root, an incomplete capability drop, a writable authoritative check, and an unavailable post-check verification were rejected; effective privileged mode was verified as false. |
+| Distinct outcomes | A missing check was `Unrunnable`; a subject exiting 126 produced an executed failed check; a simulated project-capture failure was `InfrastructureFailure`. Timeout and cancellation were recorded separately. |
+| Termination and retention | The timeout and cancellation tests observed a descendant before stopping and its absence or zombie state afterward. Evidence and project archives remained accessible after cleanup, and a container in another session remained usable. |
+
+These are observations of the fixed fixture on that environment, not a
+general security certification. The per-run JSON and project archive provide
+the detailed local evidence; descendant observations are retained for the
+timeout and cancellation controls.
+
 ### Windows localhost forwarding spike
 
 Run the forwarding integration test alone on the same Windows prerequisites:

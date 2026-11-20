@@ -22,9 +22,9 @@ Canonical product vocabulary is in the root [glossary](../GLOSSARY.md).
 | Component | Purpose and current behavior |
 | --- | --- |
 | `src/WslContainerFeasibility.WinUI` | WinUI 3 desktop interface for checking WSL container prerequisites, running the controlled fixture, viewing progress and JSON evidence location, cancelling, and waiting for cleanup when closing. |
-| `src/WslContainerFeasibility.Core` | Shared Windows-targeted implementation. `WslFixtureRunner` checks the container setup, runs synthetic host-file/credential/network boundary probes, runs the fixed Linux fixture, records outcomes, and cleans up resources. `WslPortForwardingRunner` separately probes Windows loopback port forwarding and network controls. |
-| `src/WslContainerFeasibility` | Console feasibility harness. The default path runs additional host-file, environment, network, descendant-process cleanup, and resource-ownership checks. `--fixture` runs the same controlled fixture as the UI; `--port-forwarding` runs the forwarding probe. |
-| `src/WslContainerFeasibility.Tests` | xUnit coverage that uses the native Windows WSL Containers API for fixture, boundary, forwarding, cancellation/timeout, cleanup, and non-root spike tests. These integration tests require the Windows/WSL prerequisites and may pull the pinned image. |
+| `src/WslContainerFeasibility.Core` | Shared Windows-targeted implementation. `WslFixtureRunner` checks the container setup and synthetic boundaries; `WslPortForwardingRunner` probes Windows forwarding. `WslProtectedEvaluationRunner` separately evaluates fixed synthetic changes with a protected check and retains local evidence. |
+| `src/WslContainerFeasibility` | Console feasibility harness. The default path runs additional boundary and cleanup checks. `--fixture` runs the UI fixture, `--port-forwarding` runs the forwarding probe, and `--protected-evaluation` runs one fixed Evaluation sample. |
+| `src/WslContainerFeasibility.Tests` | xUnit coverage that uses the native Windows WSL Containers API for fixture, boundary, forwarding, protected Evaluation, cancellation/timeout, cleanup, and non-root spike tests. These integration tests require the Windows/WSL prerequisites and may pull pinned images. |
 | `src/CopilotHeadlessFeasibility` | Separate .NET console experiment using the official Copilot SDK to connect to a headless Copilot CLI, inspect SDK/runtime compatibility, and initialize a restricted tool configuration with a non-executing MCP stub. It sends no prompt and performs no inference. |
 | `src/CopilotHeadlessFeasibility.Tests` | Tests the headless server connection-token behavior and the SDK/tool initialization experiment. The live test requires a separately supplied, verified CLI binary and is not part of the WSL test suite. |
 | `src/IsolatedCopilotRun` | Console harness for a bounded coding Run: model discovery, synthetic gate, billable confirmation, separate agent/executor WSL sessions, host mailbox relay, restricted tools, local evidence, and separate protected Evaluation. |
@@ -54,24 +54,30 @@ flowchart LR
         Core[WslContainerFeasibility.Core]
         Fixture[WslFixtureRunner]
         Forwarding[WslPortForwardingRunner]
+        Evaluation[WslProtectedEvaluationRunner]
         API[Microsoft.WSL.Containers API]
         Session[App-owned WSL session]
         Alpine[Pinned Alpine container]
+        Debian[Pinned Debian evaluator]
         HostProbe[Windows loopback endpoint]
-        Evidence[Local JSON evidence]
+        Evidence[Local evidence and project archive]
 
         UI --> Core
         Console --> Core
         Core --> Fixture
         Core --> Forwarding
+        Core --> Evaluation
         Fixture --> API
         Forwarding --> API
+        Evaluation --> API
         API --> Session
         Session --> Alpine
+        Session --> Debian
         Fixture --> HostProbe
         Forwarding --> HostProbe
         Fixture --> Evidence
         Forwarding --> Evidence
+        Evaluation --> Evidence
     end
 
     subgraph SDK[Separate Copilot SDK experiment]

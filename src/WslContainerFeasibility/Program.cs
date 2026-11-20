@@ -29,9 +29,25 @@ internal static class Program
             return result.Outcome == FixtureOutcome.Completed ? 0 : 1;
         }
 
+        if (args is ["--protected-evaluation", var sampleName]
+            && Enum.TryParse<EvaluationSample>(sampleName, ignoreCase: true, out var sample)
+            && Enum.IsDefined(sample))
+        {
+            var result = await new WslProtectedEvaluationRunner().RunAsync(
+                sample, new Progress<string>(message => Console.WriteLine(message)));
+            Console.WriteLine($"{result.Outcome}: {result.Summary}");
+            Console.WriteLine($"Evidence: {result.EvidencePath}");
+            if (result.ProjectArchivePath is not null)
+            {
+                Console.WriteLine($"Project archive: {result.ProjectArchivePath}");
+            }
+            return result.Outcome == EvaluationOutcome.Passed ? 0 : 1;
+        }
+
         if (args.Length != 0)
         {
-            throw new ArgumentException("Supported arguments are --fixture and --port-forwarding.");
+            throw new ArgumentException(
+                "Supported arguments are --fixture, --port-forwarding, and --protected-evaluation <correct|incorrect|tampered>.");
         }
 
         var missingComponents = WslcService.GetMissingComponents();
