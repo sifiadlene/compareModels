@@ -9,11 +9,11 @@ approved version-one product scope is described in
 
 **The current repository is a feasibility project, not that finished
 application.** It contains controlled experiments for Windows/WSL container
-behavior, Copilot SDK connectivity, and Linux workload privilege dropping. It
-does not yet define or execute coding Tasks, compare repeated Runs, evaluate
-agent-written projects, or persist comparison results. The experiments use
-synthetic fixtures; their outcomes are not evidence that arbitrary untrusted
-coding work is safely isolated.
+behavior, Copilot SDK connectivity, Linux workload privilege dropping, and a
+bounded isolated Copilot coding Run with protected Evaluation. It does not
+compare repeated Runs or persist comparison results in a database. The
+controlled proofs are not evidence that arbitrary untrusted coding work is
+safely isolated.
 
 Canonical product vocabulary is in the root [glossary](../GLOSSARY.md).
 
@@ -27,6 +27,9 @@ Canonical product vocabulary is in the root [glossary](../GLOSSARY.md).
 | `src/WslContainerFeasibility.Tests` | xUnit coverage that uses the native Windows WSL Containers API for fixture, boundary, forwarding, protected Evaluation, cancellation/timeout, cleanup, and non-root spike tests. These integration tests require the Windows/WSL prerequisites and may pull pinned images. |
 | `src/CopilotHeadlessFeasibility` | Separate .NET console experiment using the official Copilot SDK to connect to a headless Copilot CLI, inspect SDK/runtime compatibility, and initialize a restricted tool configuration with a non-executing MCP stub. It sends no prompt and performs no inference. |
 | `src/CopilotHeadlessFeasibility.Tests` | Tests the headless server connection-token behavior and the SDK/tool initialization experiment. The live test requires a separately supplied, verified CLI binary and is not part of the WSL test suite. |
+| `src/IsolatedCopilotRun` | Console harness for a bounded coding Run: model discovery, synthetic gate, billable confirmation, separate agent/executor WSL sessions, host mailbox relay, restricted tools, local evidence, and separate protected Evaluation. |
+| `src/IsolatedCopilotRun.Mailbox` | Linux MCP stdio server exposing only `run_command`; it writes requests and reads host responses without executing Task commands itself. |
+| `src/IsolatedCopilotRun.Tests` | Focused permission, tool-surface, mailbox, evidence, and missing-telemetry checks. The console `gate` command separately exercises real WSL isolation controls. |
 | `src/NonRootSpike` | Test-only Debian image recipe and Linux probes for workload privilege dropping. It is exercised by a WSL integration test using an externally built image. The test image intentionally contains unsafe privilege-escalation controls; it is not a Task image or production base image. |
 
 The Copilot SDK experiment and the WSL interface are independent prototypes;
@@ -34,9 +37,12 @@ the interface does not launch Copilot or submit coding work to a model.
 
 ## Architecture
 
-The current executable paths share the WSL feasibility core. The Copilot SDK
-experiment and non-root image spike are separate evidence tracks rather than
-production services wired into the desktop application.
+The WSL executable paths share the feasibility core. The isolated Run console
+integrates the pinned SDK/CLI with separate WSL agent, executor, and Evaluation
+sessions; its flow and commands are in the
+[isolated Run guide](../src/WslContainerFeasibility/README.md#isolated-copilot-run).
+The following diagram covers the original fixture and spike paths, which
+remain separate from the desktop coding workflow.
 
 ```mermaid
 flowchart LR
@@ -215,14 +221,12 @@ should not be interpreted as proof that the full product is ready.
 
 ## Product scope still to build
 
-The approved requirements call for reproducible Task preparation, reusable
-model Configurations, isolated repeated Runs, protected acceptance-check
-Evaluation, separate usage and correctness reporting, local history, and
-explicit exports. These are product requirements, not features currently
-implemented in the feasibility components. In particular, Copilot
-authentication, secure credential separation, enforceable task networking and
-permissions, arbitrary repository transfer, crash recovery, evaluation, and
-comparison persistence remain open engineering work.
+The isolated Run is a bounded proof, not the general Comparison workflow.
+The approved requirements still call for arbitrary repository preparation,
+reusable Configurations, repeated Runs, product-level Correctness and usage
+reporting, local history, and explicit exports. General crash recovery and
+comparison persistence remain open engineering work. The console proof does
+not add these features to the WinUI interface.
 
 Continue to use [requirements.md](requirements.md) for intended behavior and
 [spec.md](spec.md) for the evidence and feasibility gates. Do not weaken a

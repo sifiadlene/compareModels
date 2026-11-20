@@ -3,3 +3,5 @@
 /src/NonRootSpike/probe text eol=lf
 /src/NonRootSpike/verify-docker text eol=lf
 *.cs text eol=lf
+/src/IsolatedCopilotRun/images/** text eol=lf
+/src/IsolatedCopilotRun/tasks/** text eol=lf
