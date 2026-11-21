@@ -65,10 +65,14 @@ absent owned sessions, removed stores, and retained projects/evidence.
 The native comparison initially exposed an image/probe mismatch: the Debian
 network probe used `/bin/bash` in the Alpine bridged positive-control
 container, then an Alpine-only probe was also used in the Debian no-network
-evaluator. The positive probe now uses Alpine `busybox wget`; the no-network
-probe checks that only loopback exists in the evaluator, alongside the
-independently inspected `NetworkMode=none` setting and endpoint canary. All
-five focused native correct/incorrect/tampered and loopback tests now pass.
+evaluator. The positive probe now uses Alpine `busybox wget`; the Debian
+no-network probe records the interface listing and attempts a Bash `/dev/tcp`
+connection to the endpoint, alongside the independently inspected
+`NetworkMode=none` setting and endpoint canary. The interface listing is
+supplemental to the actual connection attempt. The focused native
+correct/incorrect/tampered and loopback tests passed on the recorded Windows
+environment before this probe change; the revised probe needs Windows
+revalidation.
 
 ## Comparison with native WSL
 

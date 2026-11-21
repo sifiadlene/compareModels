@@ -120,11 +120,14 @@ added. The console built without warnings.
 The native comparison initially exposed an image/probe mismatch: a Debian
 network probe used `/bin/bash` in the Alpine bridged control, then an
 Alpine-only probe was also used in the Debian no-network evaluator. The
-positive probe now uses Alpine's `busybox wget`; the no-network probe checks
-that only loopback exists in the evaluator, in addition to independent
-`NetworkMode=none` inspection and the endpoint canary. All five focused native
-correct/incorrect/tampered and loopback tests now pass. This fix is part of
-the current changes and not an MXC boundary claim.
+positive probe now uses Alpine's `busybox wget`; the Debian no-network probe
+records the evaluator's interfaces and attempts a Bash `/dev/tcp` connection to
+the endpoint, alongside independent `NetworkMode=none` inspection and the
+endpoint canary. The interface listing is supplemental to the actual connection
+attempt. The focused native correct/incorrect/tampered and loopback tests passed
+on the recorded Windows environment before this probe change; the revised probe
+needs Windows revalidation. This fix is part of the current changes and not an
+MXC boundary claim.
 
 ## Limitations
 

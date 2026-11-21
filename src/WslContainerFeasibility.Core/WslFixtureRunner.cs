@@ -485,6 +485,7 @@ public sealed class WslFixtureRunner
                     ?? ["/bin/busybox", "wget", "-T", "3", "-q", "-O", "/dev/null", $"http://{hostAddress}:{endpoint.Port}/probe"],
                 ProbeTimeout,
                 cancellationToken);
+            evidence.BlockedNetworkOutput = blocked.StandardOutput;
             bool endpointReached = await blockedRequest;
             if (blocked.ExitCode == 0 || endpointReached)
             {
@@ -801,6 +802,7 @@ internal sealed class FixtureEvidence
     public string? NetworkControlOutput { get; set; }
     public string? NetworkControlError { get; set; }
     public string BlockedNetwork { get; set; } = "NotRun";
+    public string? BlockedNetworkOutput { get; set; }
     public bool FixtureStarted { get; set; }
     public int? FixtureExitCode { get; set; }
     public string? FixtureOutput { get; set; }

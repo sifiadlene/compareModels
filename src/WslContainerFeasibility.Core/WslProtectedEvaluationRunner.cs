@@ -358,14 +358,17 @@ public sealed class WslProtectedEvaluationRunner
                         "/bin/busybox", "wget", "-T", "3", "-q", "-O", "/dev/null",
                         $"http://{address}:{port}/probe"
                     ],
-                    (_, _) =>
+                    (address, port) =>
                     [
                         "/bin/sh", "-c",
                         """
-                        set -- /sys/class/net/*
-                        [ "$#" -eq 1 ] && [ "${1##*/}" = lo ] && exit 1
-                        exit 0
-                        """
+                        interfaces=$(/bin/ls /sys/class/net | /usr/bin/tr '\n' ' ')
+                        printf 'interfaces=%s\n' "$interfaces"
+                        exec /bin/bash -c 'exec 3<>/dev/tcp/$1/$2' _ "$1" "$2"
+                        """,
+                        "sh",
+                        address,
+                        port.ToString(System.Globalization.CultureInfo.InvariantCulture)
                     ]);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -995,7 +998,7 @@ internal sealed class ProtectedEvaluationEvidence
         BoundaryData.HostFileCanary, BoundaryData.HostFileControl, BoundaryData.CredentialFileCanary,
         BoundaryData.CredentialFileControl, BoundaryData.CredentialEnvironmentCanary,
         BoundaryData.NetworkControl, BoundaryData.NetworkControlExitCode, BoundaryData.NetworkControlOutput,
-        BoundaryData.NetworkControlError, BoundaryData.BlockedNetwork);
+        BoundaryData.NetworkControlError, BoundaryData.BlockedNetwork, BoundaryData.BlockedNetworkOutput);
     public string? ContainerId { get; set; }
     public string? ContainerName { get; set; }
     public JsonElement? ContainerInspect { get; set; }
@@ -1054,4 +1057,5 @@ internal sealed record EvaluationBoundarySnapshot(
     int? NetworkControlExitCode,
     string? NetworkControlOutput,
     string? NetworkControlError,
-    string BlockedNetwork);
+    string BlockedNetwork,
+    string? BlockedNetworkOutput);

@@ -154,9 +154,16 @@ public sealed class MxcEvaluationRunner
                 containerId = await VerifyEffectiveBoundaryAsync(id, workspace, protectedDirectory, evidence);
                 evidence.BoundaryVerified = true;
                 var stopwatch = Stopwatch.StartNew();
+                Task<string> descendantObservation;
                 try
                 {
                     await File.WriteAllTextAsync(Path.Combine(workspace, "go"), "trusted host gate", cancellationToken);
+                    descendantObservation = ObserveDescendantsAsync(id, containerId);
+                    _ = descendantObservation.ContinueWith(
+                        static task => _ = task.Exception,
+                        CancellationToken.None,
+                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default);
                     using var timeout = new CancellationTokenSource(limit);
                     using var linked = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token, cancellationToken);
                     try
@@ -165,11 +172,18 @@ public sealed class MxcEvaluationRunner
                     }
                     catch (OperationCanceledException) when (linked.IsCancellationRequested)
                     {
-                        evidence.DescendantBeforeStop = await ObserveDescendantsAsync(id, containerId);
-                        process.Kill();
-                        await wait.WaitAsync(TimeSpan.FromSeconds(60));
                         evidence.Outcome = cancellationToken.IsCancellationRequested
                             ? EvaluationOutcome.Cancelled : EvaluationOutcome.TimedOut;
+                        process.Kill();
+                        await wait.WaitAsync(TimeSpan.FromSeconds(60));
+                        try
+                        {
+                            evidence.DescendantBeforeStop = await descendantObservation.WaitAsync(TimeSpan.FromSeconds(1));
+                        }
+                        catch (Exception exception)
+                        {
+                            evidence.Warnings.Add($"Descendant observation: {exception.Message}");
+                        }
                     }
                 }
                 finally
@@ -491,8 +505,8 @@ public sealed class MxcEvaluationRunner
             || host.GetProperty("Privileged").ValueKind != JsonValueKind.False
             || host.GetProperty("NetworkMode").GetString() != "none"
             || mounts.Length != 2
-            || !mounts.Any(m => m.GetProperty("Destination").GetString() == ToWslPath(workspace) && m.GetProperty("RW").GetBoolean())
-            || !mounts.Any(m => m.GetProperty("Destination").GetString() == ToWslPath(protectedDirectory) && !m.GetProperty("RW").GetBoolean()))
+            || !HasExpectedMount(mounts, ToWslPath(workspace), ToWslPath(workspace), writable: true)
+            || !HasExpectedMount(mounts, ToWslPath(protectedDirectory), ToWslPath(protectedDirectory), writable: false))
         {
             throw new MxcBoundaryException("The effective image, privileged mode, network, or filesystem grants did not match the request.");
         }
@@ -500,6 +514,12 @@ public sealed class MxcEvaluationRunner
         evidence.ImageId = root.GetProperty("Image").GetString();
         return ids[0];
     }
+
+    internal static bool HasExpectedMount(JsonElement[] mounts, string source, string destination, bool writable) =>
+        mounts.Any(m => m.GetProperty("Type").GetString() == "bind"
+            && m.GetProperty("Source").GetString() == source
+            && m.GetProperty("Destination").GetString() == destination
+            && m.GetProperty("RW").ValueKind == (writable ? JsonValueKind.True : JsonValueKind.False));
 
     private static async Task<string> ObserveDescendantsAsync(string session, string containerId)
     {
@@ -619,8 +639,9 @@ public sealed class MxcEvaluationRunner
         }
     }
 
-    internal static bool HasLine(string text, string marker) => text.Split(
-        '\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Contains(marker, StringComparer.Ordinal);
+    internal static bool HasLine(string text, string marker) => text
+        .Replace("\r\n", "\n", StringComparison.Ordinal)
+        .Split('\n').Contains(marker, StringComparer.Ordinal);
     private static string Quote(string text) => $"'{text.Replace("'", "'\\''", StringComparison.Ordinal)}'";
     private static string Unix(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal);
     private static string Hash(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));

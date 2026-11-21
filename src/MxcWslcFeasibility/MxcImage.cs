@@ -112,7 +112,15 @@ internal static class MxcImage
                 {
                     byte[] bytes = ReadSmall(entry.DataStream);
                     hashes[entry.Name] = Convert.ToHexStringLower(SHA256.HashData(bytes));
-                    config = JsonDocument.Parse(bytes);
+                    if (manifest is not null
+                        && entry.Name == manifest.RootElement[0].GetProperty("Config").GetString())
+                    {
+                        if (hashes[entry.Name] != ConfigSha256)
+                        {
+                            throw new IOException("The image configuration does not match the pinned digest.");
+                        }
+                        config = JsonDocument.Parse(bytes);
+                    }
                 }
                 else
                 {

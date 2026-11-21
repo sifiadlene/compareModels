@@ -11,6 +11,35 @@ public sealed class MxcEvaluationRunnerTests
 {
     private readonly MxcEvaluationRunner _sut = new();
 
+    [Theory]
+    [InlineData("MXC_INTEGRITY_AFTER", true)]
+    [InlineData("MXC_INTEGRITY_AFTER\r\n", true)]
+    [InlineData("  MXC_INTEGRITY_AFTER", false)]
+    [InlineData("subject_output:\n  MXC_INTEGRITY_AFTER", false)]
+    public void GivenOutputLine_WhenIntegrityMarkerIsChecked_OnlyExactLinesMatch(string output, bool expected) =>
+        Assert.Equal(expected, MxcEvaluationRunner.HasLine(output, "MXC_INTEGRITY_AFTER"));
+
+    [Fact]
+    public void GivenMountAtExpectedDestination_WhenSourceOrTypeDiffers_MountIsRejected()
+    {
+        using var document = JsonDocument.Parse(
+            """[{"Type":"bind","Source":"/mnt/c/workspace","Destination":"/mnt/c/workspace","RW":true}]""");
+        JsonElement[] mounts = document.RootElement.EnumerateArray().ToArray();
+
+        Assert.True(MxcEvaluationRunner.HasExpectedMount(
+            mounts, "/mnt/c/workspace", "/mnt/c/workspace", writable: true));
+        Assert.False(MxcEvaluationRunner.HasExpectedMount(
+            mounts, "/mnt/c/other", "/mnt/c/workspace", writable: true));
+        Assert.False(MxcEvaluationRunner.HasExpectedMount(
+            mounts, "/mnt/c/workspace", "/mnt/c/workspace", writable: false));
+
+        using var wrongType = JsonDocument.Parse(
+            """[{"Type":"volume","Source":"/mnt/c/workspace","Destination":"/mnt/c/workspace","RW":true}]""");
+        Assert.False(MxcEvaluationRunner.HasExpectedMount(
+            wrongType.RootElement.EnumerateArray().ToArray(),
+            "/mnt/c/workspace", "/mnt/c/workspace", writable: true));
+    }
+
     [Fact]
     public async Task GivenNoTelemetryApproval_WhenEvaluated_NativeInitializationIsBlocked()
     {
