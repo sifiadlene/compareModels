@@ -73,6 +73,7 @@ public sealed class WslProtectedEvaluationRunnerTests
                 {
                     Assert.Equal("Passed", boundaries.GetProperty(field).GetString());
                 }
+                Assert.Contains("interfaces=lo", boundaries.GetProperty("blockedNetworkOutput").GetString());
                 Assert.Equal(WslProtectedEvaluationRunner.EvaluationImage, boundaries.GetProperty("imageReference").GetString());
                 Assert.False(string.IsNullOrWhiteSpace(boundaries.GetProperty("imageId").GetString()));
                 Assert.False(string.IsNullOrWhiteSpace(boundaries.GetProperty("wslVersion").GetString()));
