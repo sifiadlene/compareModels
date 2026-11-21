@@ -302,7 +302,8 @@ public sealed class WslFixtureRunner
         FixtureEvidence evidence,
         CancellationToken cancellationToken,
         string expectedImage = ImageReference,
-        Func<string, int, string[]>? networkProbe = null)
+        Func<string, int, string[]>? networkProbe = null,
+        Func<string, int, string[]>? blockedNetworkProbe = null)
     {
         using (var inspect = JsonDocument.Parse(container.Inspect()))
         {
@@ -480,7 +481,7 @@ public sealed class WslFixtureRunner
             var blockedRequest = endpoint.WaitForRequestAsync(TimeSpan.FromSeconds(2));
             var blocked = await RunProcessAsync(
                 options.UseControlForBlockedProbe ? control : container,
-                networkProbe?.Invoke(hostAddress, endpoint.Port)
+                blockedNetworkProbe?.Invoke(hostAddress, endpoint.Port)
                     ?? ["/bin/busybox", "wget", "-T", "3", "-q", "-O", "/dev/null", $"http://{hostAddress}:{endpoint.Port}/probe"],
                 ProbeTimeout,
                 cancellationToken);

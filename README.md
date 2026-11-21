@@ -15,3 +15,6 @@ The Windows desktop feasibility interface and its run instructions are
 documented in [`src/WslContainerFeasibility/README.md`](src/WslContainerFeasibility/README.md).
 That guide also describes the [isolated Copilot Run](src/WslContainerFeasibility/README.md#isolated-copilot-run)
 console harness, private token entry, and billable-work confirmation.
+
+The separate [MXC WSLC Evaluation spike](src/MxcWslcFeasibility/README.md)
+compares the packaged MXC policy/SDK layer with the native WSL baseline.

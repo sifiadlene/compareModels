@@ -130,6 +130,9 @@ These tests pull the pinned image and save local evidence.
 
 ### Protected Evaluation spike (#30)
 
+The separate [MXC WSLC spike (#31)](../MxcWslcFeasibility/README.md) reuses
+these synthetic acceptance checks to assess MXC's policy and .NET layer.
+
 This console-only spike evaluates fixed synthetic changes, not a user project
 or a live agent. It requires the **3.0.5** WSL container service, .NET 10,
 the WSL CLI, and access to the pinned public Alpine and Debian images:
