@@ -86,13 +86,16 @@ internal static class MxcImage
         }
     }
 
-    internal static string Validate(string path)
+    internal static string Validate(string path) => Validate(path, ConfigSha256);
+
+    internal static string Validate(string path, string configSha256)
     {
         using var archive = File.OpenRead(path);
         using var reader = new TarReader(archive);
         var hashes = new Dictionary<string, string>(StringComparer.Ordinal);
         JsonDocument? manifest = null;
         JsonDocument? config = null;
+        byte[]? pinnedConfig = null;
         try
         {
             TarEntry? entry;
@@ -107,19 +110,14 @@ internal static class MxcImage
                 {
                     manifest = JsonDocument.Parse(ReadSmall(entry.DataStream));
                 }
-                else if (entry.Name.EndsWith(ConfigSha256, StringComparison.Ordinal)
-                    || entry.Name == $"{ConfigSha256}.json")
+                else if (entry.Name.EndsWith(configSha256, StringComparison.Ordinal)
+                    || entry.Name == $"{configSha256}.json")
                 {
                     byte[] bytes = ReadSmall(entry.DataStream);
                     hashes[entry.Name] = Convert.ToHexStringLower(SHA256.HashData(bytes));
-                    if (manifest is not null
-                        && entry.Name == manifest.RootElement[0].GetProperty("Config").GetString())
+                    if (hashes[entry.Name] == configSha256)
                     {
-                        if (hashes[entry.Name] != ConfigSha256)
-                        {
-                            throw new IOException("The image configuration does not match the pinned digest.");
-                        }
-                        config = JsonDocument.Parse(bytes);
+                        pinnedConfig = bytes;
                     }
                 }
                 else
@@ -127,16 +125,20 @@ internal static class MxcImage
                     hashes[entry.Name] = Convert.ToHexStringLower(SHA256.HashData(entry.DataStream));
                 }
             }
-            if (manifest is null || config is null || manifest.RootElement.GetArrayLength() != 1)
+            if (manifest is null || pinnedConfig is null || manifest.RootElement.GetArrayLength() != 1)
             {
                 throw new IOException("The archive is not the single pinned Docker-save image.");
             }
             var image = manifest.RootElement[0];
             string configPath = image.GetProperty("Config").GetString()
                 ?? throw new IOException("The image configuration path is missing.");
-            if (!hashes.TryGetValue(configPath, out string? configHash) || configHash != ConfigSha256
-                || !image.GetProperty("RepoTags").EnumerateArray().Any(tag => tag.GetString() == Name)
-                || config.RootElement.GetProperty("os").GetString() != "linux"
+            if (!hashes.TryGetValue(configPath, out string? configHash) || configHash != configSha256
+                || !image.GetProperty("RepoTags").EnumerateArray().Any(tag => tag.GetString() == Name))
+            {
+                throw new IOException("The image identity, tag, or architecture does not match the pinned baseline.");
+            }
+            config = JsonDocument.Parse(pinnedConfig);
+            if (config.RootElement.GetProperty("os").GetString() != "linux"
                 || config.RootElement.GetProperty("architecture").GetString() != "amd64")
             {
                 throw new IOException("The image identity, tag, or architecture does not match the pinned baseline.");

@@ -358,18 +358,7 @@ public sealed class WslProtectedEvaluationRunner
                         "/bin/busybox", "wget", "-T", "3", "-q", "-O", "/dev/null",
                         $"http://{address}:{port}/probe"
                     ],
-                    (address, port) =>
-                    [
-                        "/bin/sh", "-c",
-                        """
-                        interfaces=$(/bin/ls /sys/class/net | /usr/bin/tr '\n' ' ')
-                        printf 'interfaces=%s\n' "$interfaces"
-                        exec /bin/bash -c 'exec 3<>/dev/tcp/$1/$2' _ "$1" "$2"
-                        """,
-                        "sh",
-                        address,
-                        port.ToString(System.Globalization.CultureInfo.InvariantCulture)
-                    ]);
+                    CreateBlockedNetworkProbe);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -724,6 +713,19 @@ public sealed class WslProtectedEvaluationRunner
         };
         return new(evidence.Outcome, summary, evidencePath, evidence.ProjectArchivePath);
     }
+
+    internal static string[] CreateBlockedNetworkProbe(string address, int port) =>
+    [
+        "/bin/sh", "-c",
+        """
+        interfaces=$(/bin/ls /sys/class/net | /usr/bin/tr '\n' ' ')
+        printf 'interfaces=%s\n' "$interfaces"
+        exec /bin/bash -c 'exec 3<>/dev/tcp/$1/$2' _ "$1" "$2"
+        """,
+        "sh",
+        address,
+        port.ToString(System.Globalization.CultureInfo.InvariantCulture)
+    ];
 
     private static async Task VerifyCheckAsync(
         Container container, string expectedHash, string expectedOutputHash, CancellationToken cancellationToken)

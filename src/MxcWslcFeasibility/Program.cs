@@ -16,7 +16,7 @@ if (args is [var sampleName, "--accept-required-telemetry"]
         var result = await new MxcEvaluationRunner().RunAsync(sample, true, cancellation.Token);
         Console.WriteLine($"{result.Outcome}: {result.Summary}");
         Console.WriteLine($"Evidence: {result.EvidencePath}");
-        Console.WriteLine($"Retained project: {result.ProjectDirectoryPath ?? "unavailable"}");
+        Console.WriteLine($"Retained project archive (untrusted): {result.ProjectArchivePath ?? "unavailable"}");
         return result.Outcome == EvaluationOutcome.Passed ? 0 : 1;
     }
     finally

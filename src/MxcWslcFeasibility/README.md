@@ -46,41 +46,50 @@ path.
 The archive is under
 `%LOCALAPPDATA%\compareModels\Feasibility\MxcWslc\image`.
 Its configuration digest and every uncompressed layer are validated against
-the pinned image before import; the archive hash is recorded per Evaluation.
+the pinned image before import, regardless of archive entry order; only the
+manifest-selected configuration is trusted. The archive hash is recorded per Evaluation.
 The deterministic local tag is necessary because MXC's Docker-save import
 does not map a registry manifest digest to the imported tag.
 
 ## Boundary and retained evidence
 
 Each Evaluation has its own MXC session and image store. Egress, ingress, and
-host loopback are explicitly denied. Only the generated workspace is mounted
-read-write; a separate trusted-source directory is mounted read-only. A
-separate positive control mounts synthetic host/credential canaries, while the
-evaluator must be unable to read them.
+host loopback are explicitly denied. The evaluator requests **no host mounts**.
+A separate positive control mounts synthetic host/credential canaries, while
+the evaluator must be unable to read them.
 
 A trusted root orchestrator provisions the acceptance check outside the
 workspace and verifies its ownership, permissions, bytes, and ancestors. The
 sample runs as UID/GID 65534 with all capability sets cleared and
 `NoNewPrivs=1`. The orchestrator verifies writable-workspace controls,
-direct/symlink/rename protection, source-mount write denial, and loopback-only
+direct/symlink/rename protection and loopback-only
 interfaces before announcing readiness. The Windows host independently
 inspects the exact session's sole container, pinned image, non-privileged mode,
-network `none`, and two mount grants before releasing the sample.
+network `none`, and zero mounts before releasing the sample through stdin.
+The sample receives no gate input.
 
 The trusted check's exit status is authoritative, not candidate output, a
 workspace check, or a report. Post-check integrity is required for a pass or
 executed failure. The Evaluation deadline is separate from image import and
-boundary setup. Cancellation and timeout call `MxcProcess.Kill()`, not merely
-cancel `RunAsync` awaiting. The descendant controls retain process observations,
-a stopped heartbeat, and confirmation that the owned session disappeared.
+boundary setup and starts before the stdin release. If release stalls until
+the deadline or cancellation, the host initiates `Kill` immediately; because
+the project could not be captured safely, the result is an infrastructure
+failure with the prior timeout/cancellation recorded. Otherwise, after
+completion, cancellation or timeout, pause and paused-state verification share
+a one-second deadline; only a verified pause permits the ten-second-bounded
+copy. The host initiates `Kill` in a `finally` path if either step fails or
+stalls. Capture or cleanup failure is reported as an infrastructure failure.
+The descendant controls retain process observations, a stopped heartbeat, and
+confirmation that the owned session disappeared.
 
 JSON Run evidence is saved before final disposal and updated after cleanup
 under `%LOCALAPPDATA%\compareModels\Feasibility\Evidence`. The resulting
-workspace remains under `...\MxcWslc\<run-id>\workspace`, outside the deleted
-image store. It is **untrusted and may contain Linux symlinks**: do not follow
-links into sensitive locations. The spike retains this directory rather than
-creating a Windows tar archive; Windows .NET archive creation did not handle
-the observed Linux symlinks.
+workspace is retained as `...\MxcWslc\<run-id>\workspace.tar`, outside the
+deleted image store. The archive is limited to 1 MiB and 1,000 entries and is
+validated for contained, unique entry paths and supported entry types. It is
+**untrusted and may contain Linux symlinks**, including links outside the
+workspace. The runner does not extract it; do not extract it into a trusted
+directory or follow its links.
 
 ## Windows integration controls
 
@@ -102,20 +111,28 @@ artifacts, and survival of an unrelated native WSL container.
 
 ### Observed Windows results
 
-All 12 MXC controls passed on Windows `10.0.26300.9974`, WSL `3.0.5.0`,
+The original mounted design was blocked before the acceptance check: WSLC
+exposed opaque `/mnt/{GUID}` mount sources rather than the expected host paths.
+A temporary investigation compared Windows-side WSLC
+inspection with Docker's bind data and metadata; these reports share the same
+source record and do not independently prove the Windows directory backing the
+guest mount. See the [investigation](../../docs/research/mxc-wslc-protected-evaluation.md#wslc-305-mount-source-investigation)
+for the version-pinned source and observed mapping limitation.
+
+The mountless runner's 47 test cases passed on Windows
+`10.0.26300.9974`, WSL `3.0.5.0`,
 WSLC `3.0.5`, kernel `6.18.58.1-1`, .NET runtime `10.0.15`, and SDK
-`10.0.404`. A final focused rerun confirmed correct execution, no-approval
-blocking, cancellation, and timeout after daemon-observation recording was
-added. The console built without warnings.
+`10.0.404`, including deterministic stalled/failing-operation tests and real
+synthetic Evaluation controls after the lifecycle-deadline refinements.
 
 | Control | Observed outcome |
 | --- | --- |
 | Correct / incorrect / tampered | Passed / Failed / Failed. Fake workspace checks, reports, and pass output did not change the authoritative failure. |
-| Effective boundary | Network `none`, non-privileged mode, exactly two intended mounts, denied source/check writes, and verified non-root capability-free sample execution. |
+| Effective boundary | Network `none`, non-privileged mode, zero mounts, denied check writes, and non-root capability-free sample execution. |
 | Unsafe / unavailable protections | Writable authoritative check, incomplete bounding-set drop, and missing final integrity were Blocked. |
 | Result distinctions | Missing command was Unrunnable; subject exit 126 was an executed Failed check; a retention failure was InfrastructureFailure with the earlier Passed outcome preserved. |
 | Cancellation / timeout | Distinct outcomes, a descendant observed before stopping, heartbeat stopped, and owned session absent afterward. |
-| Persistence / cleanup | Project and JSON remained accessible; owned stores were removed and an unrelated container remained usable. No new lifecycle daemon was observed in the final runs. |
+| Persistence / cleanup | A validated, unextracted project tar and JSON remained accessible; owned stores were removed and an unrelated container remained usable. A deliberately failed copy after pause produced an infrastructure failure. |
 
 The native comparison initially exposed an image/probe mismatch: a Debian
 network probe used `/bin/bash` in the Alpine bridged control, then an
@@ -124,10 +141,9 @@ positive probe now uses Alpine's `busybox wget`; the Debian no-network probe
 records the evaluator's interfaces and attempts a Bash `/dev/tcp` connection to
 the endpoint, alongside independent `NetworkMode=none` inspection and the
 endpoint canary. The interface listing is supplemental to the actual connection
-attempt. The focused native correct/incorrect/tampered and loopback tests passed
-on the recorded Windows environment before this probe change; the revised probe
-needs Windows revalidation. This fix is part of the current changes and not an
-MXC boundary claim.
+attempt. The revised Debian probe connected from a bridged container and was
+blocked from an isolated container; the native correct-sample Evaluation also
+passed. This is not an MXC boundary claim.
 
 ## Limitations
 
@@ -135,11 +151,17 @@ MXC WSLC uses the same underlying WSL boundary as the native baseline. These
 fixed controls do not prove resistance to malicious container escapes or
 readiness for arbitrary projects. MXC exposes no workload user/capability
 settings here, so the trusted wrapper still performs and verifies the drop.
-No read-only root filesystem is requested or claimed. Host-mounted trees have
-documented junction/hard-link and canonicalization race limitations.
+No read-only root filesystem is requested or claimed. The separate positive
+canary control uses host mounts and has the documented host-tree limitations.
 
 The one-shot path avoids the lifecycle daemon. Native startup/import cannot
 be interrupted by cancelling a .NET await; cancellation is acted on once
-`Spawn` returns a process handle. Abrupt termination, crash recovery, policy
-enforcement against arbitrary malicious code, and telemetry routing remain
-unverified. Any required parent protection not demonstrated remains blocked.
+`Spawn` returns a process handle. A timed-out debug client does not prove that
+an in-flight daemon operation was cancelled. The SDK's synchronous `Kill` is
+started independently, but completion is not guaranteed by a hard deadline;
+if a debug operation (including descendant observation), termination or
+disposal remains in progress, cleanup fails and the store and host canaries are
+retained rather than deleted unsafely. Abrupt termination, crash recovery,
+policy enforcement against arbitrary malicious code, and telemetry routing
+remain unverified. Any required parent protection not demonstrated remains
+blocked.
