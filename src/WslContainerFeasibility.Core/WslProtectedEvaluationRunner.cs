@@ -51,7 +51,7 @@ public sealed class WslProtectedEvaluationRunner
         "--inh-caps=-all", "--ambient-caps=-all", "--bounding-set=-all", "--no-new-privs"
     ];
 
-    private const string CheckScript = """
+    internal const string CheckScript = """
         #!/bin/sh
         set -u
         printf 'CHECK_STARTED\n'
@@ -90,7 +90,7 @@ public sealed class WslProtectedEvaluationRunner
         exit 125
         """;
 
-    private const string PrivilegeProbe = """
+    internal const string PrivilegeProbe = """
         /usr/bin/id
         /bin/grep -E '^(CapInh|CapEff|CapBnd|CapAmb|NoNewPrivs):' /proc/self/status
         [ "$(/usr/bin/id -u)" = 65534 ] || exit 11
@@ -103,7 +103,7 @@ public sealed class WslProtectedEvaluationRunner
         printf 'STATE_OK\n'
         """;
 
-    private const string ProtectionProbe = """
+    internal const string ProtectionProbe = """
         set -eu
         printf 'writable\n' > /workspace/protection-control
         printf 'WORKSPACE_WRITE_OK\n'
@@ -355,9 +355,10 @@ public sealed class WslProtectedEvaluationRunner
                     new RunnerTestOptions(), evidence.BoundaryData, cancellationToken, EvaluationImage,
                     (address, port) =>
                     [
-                        "/bin/bash", "-c", "exec 3<>/dev/tcp/$1/$2",
-                        "network-probe", address, port.ToString()
-                    ]);
+                        "/bin/busybox", "wget", "-T", "3", "-q", "-O", "/dev/null",
+                        $"http://{address}:{port}/probe"
+                    ],
+                    CreateBlockedNetworkProbe);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -713,6 +714,19 @@ public sealed class WslProtectedEvaluationRunner
         return new(evidence.Outcome, summary, evidencePath, evidence.ProjectArchivePath);
     }
 
+    internal static string[] CreateBlockedNetworkProbe(string address, int port) =>
+    [
+        "/bin/sh", "-c",
+        """
+        interfaces=$(/bin/ls /sys/class/net | /usr/bin/tr '\n' ' ')
+        printf 'interfaces=%s\n' "$interfaces"
+        exec /bin/bash -c 'exec 3<>/dev/tcp/$1/$2' _ "$1" "$2"
+        """,
+        "sh",
+        address,
+        port.ToString(System.Globalization.CultureInfo.InvariantCulture)
+    ];
+
     private static async Task VerifyCheckAsync(
         Container container, string expectedHash, string expectedOutputHash, CancellationToken cancellationToken)
     {
@@ -746,7 +760,7 @@ public sealed class WslProtectedEvaluationRunner
         }
     }
 
-    private static string CreateSample(EvaluationTestOptions options, string runId)
+    internal static string CreateSample(EvaluationTestOptions options, string runId)
     {
         if (options.LongRunning)
         {
@@ -986,7 +1000,7 @@ internal sealed class ProtectedEvaluationEvidence
         BoundaryData.HostFileCanary, BoundaryData.HostFileControl, BoundaryData.CredentialFileCanary,
         BoundaryData.CredentialFileControl, BoundaryData.CredentialEnvironmentCanary,
         BoundaryData.NetworkControl, BoundaryData.NetworkControlExitCode, BoundaryData.NetworkControlOutput,
-        BoundaryData.NetworkControlError, BoundaryData.BlockedNetwork);
+        BoundaryData.NetworkControlError, BoundaryData.BlockedNetwork, BoundaryData.BlockedNetworkOutput);
     public string? ContainerId { get; set; }
     public string? ContainerName { get; set; }
     public JsonElement? ContainerInspect { get; set; }
@@ -1045,4 +1059,5 @@ internal sealed record EvaluationBoundarySnapshot(
     int? NetworkControlExitCode,
     string? NetworkControlOutput,
     string? NetworkControlError,
-    string BlockedNetwork);
+    string BlockedNetwork,
+    string? BlockedNetworkOutput);

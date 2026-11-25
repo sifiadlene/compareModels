@@ -14,6 +14,82 @@ public sealed class WslProtectedEvaluationRunnerTests
     private readonly WslProtectedEvaluationRunner _sut = new();
 
     [Fact]
+    public async Task GivenDebianNetworkProbe_WhenBridgedAndIsolated_OnlyBridgedContainerConnects()
+    {
+        string storage = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "compareModels", "Feasibility", "test-controls", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(storage);
+        using var session = new Session(new SessionSettings($"CompareModels-NetworkProbe-{Guid.NewGuid():N}", storage)
+        {
+            CpuCount = 1,
+            MemorySizeInMB = 512,
+            HostLoopback = "host.wslc.internal"
+        });
+        bool started = false;
+        try
+        {
+            started = true;
+            session.Start();
+            await WslFixtureRunner.PullImageAsync(session, WslProtectedEvaluationRunner.EvaluationImage, CancellationToken.None);
+            using var bridged = CreateProbeContainer(ContainerNetworkingMode.Bridged);
+            using var isolated = CreateProbeContainer(ContainerNetworkingMode.None);
+            try
+            {
+                bridged.Start();
+                isolated.Start();
+                var resolved = await WslFixtureRunner.RunProcessAsync(
+                    bridged, ["/bin/sh", "-c", "getent hosts host.wslc.internal | awk '$1 ~ /^[0-9.]+$/ { print $1; exit }'"],
+                    TimeSpan.FromSeconds(20), CancellationToken.None);
+                Assert.Equal(0, resolved.ExitCode);
+                string address = resolved.StandardOutput.Trim();
+                Assert.True(System.Net.IPAddress.TryParse(address, out _));
+                using var endpoint = new LoopbackEndpoint();
+
+                Task<bool> bridgedRequest = endpoint.WaitForRequestAsync(TimeSpan.FromSeconds(10));
+                var positive = await WslFixtureRunner.RunProcessAsync(
+                    bridged, WslProtectedEvaluationRunner.CreateBlockedNetworkProbe(address, endpoint.Port),
+                    TimeSpan.FromSeconds(20), CancellationToken.None);
+                Assert.Equal(0, positive.ExitCode);
+                Assert.True(await bridgedRequest);
+
+                Task<bool> isolatedRequest = endpoint.WaitForRequestAsync(TimeSpan.FromSeconds(2));
+                var negative = await WslFixtureRunner.RunProcessAsync(
+                    isolated, WslProtectedEvaluationRunner.CreateBlockedNetworkProbe(address, endpoint.Port),
+                    TimeSpan.FromSeconds(20), CancellationToken.None);
+                Assert.Equal(1, negative.ExitCode);
+                Assert.Contains("interfaces=lo", negative.StandardOutput);
+                Assert.False(await isolatedRequest);
+            }
+            finally
+            {
+                StopAndDeleteContainer(isolated);
+                StopAndDeleteContainer(bridged);
+            }
+        }
+        finally
+        {
+            if (started) session.Terminate();
+            Directory.Delete(storage, recursive: true);
+        }
+
+        Container CreateProbeContainer(ContainerNetworkingMode networkingMode) =>
+            session.CreateContainer(new ContainerSettings(WslProtectedEvaluationRunner.EvaluationImage)
+            {
+                Name = $"compare-models-network-probe-{Guid.NewGuid():N}",
+                InitProcess = new ProcessSettings
+                {
+                    CommandLine = ["/bin/sleep", "600"],
+                    OutputMode = ProcessOutputMode.Event
+                },
+                NetworkingMode = networkingMode,
+                EnableAutoRemove = false,
+                EnableGpu = false,
+                Privileged = false
+            });
+    }
+
+    [Fact]
     public async Task GivenCorrectSample_WhenEvaluated_EvidenceAndProjectRemainAndOtherContainerSurvives()
     {
         string storage = Path.Combine(
@@ -73,6 +149,7 @@ public sealed class WslProtectedEvaluationRunnerTests
                 {
                     Assert.Equal("Passed", boundaries.GetProperty(field).GetString());
                 }
+                Assert.Contains("interfaces=lo", boundaries.GetProperty("blockedNetworkOutput").GetString());
                 Assert.Equal(WslProtectedEvaluationRunner.EvaluationImage, boundaries.GetProperty("imageReference").GetString());
                 Assert.False(string.IsNullOrWhiteSpace(boundaries.GetProperty("imageId").GetString()));
                 Assert.False(string.IsNullOrWhiteSpace(boundaries.GetProperty("wslVersion").GetString()));
