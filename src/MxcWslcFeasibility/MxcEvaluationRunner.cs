@@ -27,13 +27,14 @@ public sealed class MxcEvaluationRunner
         RunForTestAsync(new(sample), acceptRequiredTelemetry, cancellationToken);
 
     internal async Task<MxcEvaluationResult> RunForTestAsync(
-        MxcEvaluationOptions options, bool acceptRequiredTelemetry, CancellationToken cancellationToken = default)
+        MxcEvaluationOptions options, bool acceptRequiredTelemetry, CancellationToken cancellationToken = default,
+        string? localApplicationData = null)
     {
         if (!Enum.IsDefined(options.Sample)) throw new ArgumentOutOfRangeException(nameof(options));
         TimeSpan limit = options.Limit ?? TimeSpan.FromSeconds(15);
         if (limit <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(options));
         string id = $"CompareModels-MxcEvaluation-{Guid.NewGuid():N}";
-        string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        string local = localApplicationData ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (string.IsNullOrWhiteSpace(local)) throw new IOException("Local application data is unavailable.");
         string directory = Path.Combine(local, "compareModels", "Feasibility", "MxcWslc", id);
         string storage = Path.Combine(directory, "store");
@@ -50,7 +51,8 @@ public sealed class MxcEvaluationRunner
             EvaluationLimitMilliseconds = limit.TotalMilliseconds,
             SessionName = id,
             StoragePath = storage,
-            ImageReference = WslProtectedEvaluationRunner.EvaluationImage
+            ImageReference = WslProtectedEvaluationRunner.EvaluationImage,
+            DescendantMarker = options.LongRunning ? $"comparemodels-evaluation-child-{id}" : null
         };
         MxcProcess? process = null;
         bool spawnAttempted = false;
@@ -70,6 +72,13 @@ public sealed class MxcEvaluationRunner
         var debugOperations = new List<Task>();
         var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var resultReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var descendantReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var observationStopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task StartOwnedKill()
+        {
+            observationStopped.TrySetResult();
+            return kill ??= StartKillAsync(process!.Kill, wait);
+        }
         try
         {
             if (!acceptRequiredTelemetry)
@@ -113,12 +122,7 @@ public sealed class MxcEvaluationRunner
             Directory.CreateDirectory(directory);
             Directory.CreateDirectory(canaries);
             string sample = options.LongRunning
-                ? """
-                  #!/bin/sh
-                  /bin/sh -c 'while :; do printf x >> /workspace/heartbeat; printf "HEARTBEAT\n" >&2; /bin/sleep 0.1; done' child &
-                  printf 'CHILD_READY\n' >&2
-                  wait
-                  """
+                ? CreateLongRunningSample(evidence.DescendantMarker!)
                 : WslProtectedEvaluationRunner.CreateSample(
                     new(options.Sample, SubjectExit126: options.SubjectExit126), id);
             await File.WriteAllTextAsync(Path.Combine(canaries, "host.txt"), "synthetic host canary", cancellationToken);
@@ -145,7 +149,11 @@ public sealed class MxcEvaluationRunner
                 if (HasLine(output.Text, "MXC_BOUNDARY_READY")) ready.TrySetResult();
                 if (HasLine(output.Text, "MXC_RESULT_READY")) resultReady.TrySetResult();
             });
-            readError = ReadAsync(stderr, error);
+            readError = ReadAsync(stderr, error, () =>
+            {
+                if (evidence.DescendantMarker is { } marker && HasCompleteLine(error.Text, $"CHILD_READY={marker}"))
+                    descendantReady.TrySetResult();
+            });
             wait = process.WaitAsync();
             Task first = await Task.WhenAny(ready.Task, wait).WaitAsync(TimeSpan.FromSeconds(90), cancellationToken);
             if (first == ready.Task)
@@ -161,10 +169,19 @@ public sealed class MxcEvaluationRunner
                         await stdin.FlushAsync();
                         stdin.Close();
                     }, Task.WhenAny(resultReady.Task, wait),
-                        () => ObserveDescendantsAsync(id, containerId), limit, cancellationToken,
+                        () => ObserveDescendantsAsync(id, containerId),
+                        limit, cancellationToken,
                         task => gateRelease = task, debugOperations.Add,
-                        () => kill ??= StartKillAsync(process.Kill, wait),
-                        evidence);
+                        StartOwnedKill, evidence,
+                        observationReady: options.LongRunning ? descendantReady.Task : null,
+                        observationStop: options.LongRunning ? observationStopped.Task : null,
+                        onObservationCompleted: snapshot =>
+                        {
+                            if (options.DescendantObserved is { } onVerified
+                                && evidence.DescendantMarker is { } marker
+                                && HasSampleDescendant(snapshot, marker))
+                                onVerified();
+                        });
                     if (!evaluationWait.GateInterrupted)
                     {
                         Task<string> observation = evaluationWait.Observation!;
@@ -187,7 +204,7 @@ public sealed class MxcEvaluationRunner
                                     return state.ExitCode == 0 && state.StandardOutput.Trim() == "true";
                                 },
                                 () => CaptureArchiveAsync(id, containerId, options.FailCapture),
-                                () => kill ??= StartKillAsync(process.Kill, wait),
+                                StartOwnedKill,
                                 CaptureOperationLimit, () => evidence.PauseVerified = true,
                                 debugOperations.Add);
                         }
@@ -198,12 +215,11 @@ public sealed class MxcEvaluationRunner
                         }
                         finally
                         {
-                            kill ??= StartKillAsync(process.Kill, wait);
+                            _ = StartOwnedKill();
                         }
                         if (evidence.OutcomeBeforeCapture is EvaluationOutcome.Cancelled or EvaluationOutcome.TimedOut)
                         {
-                            try { evidence.DescendantBeforeStop = await observation.WaitAsync(TimeSpan.FromSeconds(1)); }
-                            catch (Exception exception) { evidence.Warnings.Add($"Descendant observation: {exception.Message}"); }
+                            await RecordDescendantObservationAsync(observation, evidence.DescendantMarker, evidence);
                         }
                         if (archive is not null)
                         {
@@ -271,7 +287,7 @@ public sealed class MxcEvaluationRunner
             {
                 try
                 {
-                    kill ??= StartKillAsync(process.Kill, wait);
+                    kill = StartOwnedKill();
                     bool drained = await FinishProcessAsync(kill, wait, readOutput, readError,
                         TimeSpan.FromSeconds(20), TimeSpan.FromSeconds(60), evidence.CleanupErrors);
                     if (gateRelease is not null)
@@ -428,6 +444,7 @@ public sealed class MxcEvaluationRunner
         var errors = new List<string>();
         if (evidence.Error is not null) errors.Add(evidence.Error);
         if (evidence.CaptureError is not null) errors.Add(evidence.CaptureError);
+        if (evidence.DescendantObservationError is not null) errors.Add(evidence.DescendantObservationError);
         errors.AddRange(evidence.CleanupErrors);
         errors.AddRange(evidence.PersistenceErrors);
         string summary = errors.Count > 0 ? string.Join("; ", errors) : $"MXC WSLC Evaluation: {evidence.Outcome}.";
@@ -499,7 +516,19 @@ public sealed class MxcEvaluationRunner
         };
     }
 
-    private static string CreateOrchestrator(
+    internal static string CreateLongRunningSample(string marker, string heartbeatPath = "/workspace/heartbeat")
+    {
+        string child = $"printf x >> {Quote(heartbeatPath)} || exit 1; " +
+            "printf 'CHILD_READY=%s\\n' \"$0\" >&2; " +
+            $"while :; do printf 'HEARTBEAT\\n' >&2; /bin/sleep 0.1; printf x >> {Quote(heartbeatPath)} || exit 1; done";
+        return $$"""
+            #!/bin/sh
+            /bin/sh -c {{Quote(child)}} {{Quote(marker)}} &
+            wait "$!"
+            """;
+    }
+
+    internal static string CreateOrchestrator(
         MxcEvaluationOptions options, string credentialVariable, string canaries, string sample, string check)
     {
         string drop = string.Join(' ', DropArguments.Where(argument =>
@@ -527,7 +556,7 @@ public sealed class MxcEvaluationRunner
             /bin/cat /proc/self/mountinfo
             [ "$(/bin/ls /sys/class/net)" = lo ] || { printf 'EXTERNAL_INTERFACE_PRESENT\n'; exit 70; }
             printf 'NETWORK_NONE_VERIFIED\n'
-            [ ! -r '{{canaries}}/host.txt' ] && [ ! -r '{{canaries}}/credential.txt' ] || exit 70
+            [ ! -r {{Quote(canaries + "/host.txt")}} ] && [ ! -r {{Quote(canaries + "/credential.txt")}} ] || exit 70
             [ -z "${{{credentialVariable}}:-}" ] || exit 70
             printf 'HOST_AND_CREDENTIAL_CANARIES_DENIED\n'
             /bin/mkdir /workspace
@@ -714,16 +743,34 @@ public sealed class MxcEvaluationRunner
         using var timeout = new CancellationTokenSource(limit);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token, cancellationToken);
         return await WaitForMountlessResultAsync(wait, observeDescendants, linked.Token,
-            cancellationToken, evidence, onObservationStarted);
+            cancellationToken, evidence, onObservationStarted, null, null, null);
     }
 
     private static async Task<Task<string>> WaitForMountlessResultAsync(
         Task wait, Func<Task<string>> observeDescendants, CancellationToken deadlineToken,
         CancellationToken cancellationToken, MxcEvaluationEvidence evidence,
-        Action<Task>? onObservationStarted)
+        Action<Task>? onObservationStarted, Task? observationReady, Task? observationStop,
+        Action<string>? onObservationCompleted)
     {
         // Starting the inspection process is synchronous and must not delay cancellation.
-        Task<string> observation = Task.Run(observeDescendants);
+        Task<string> observation = Task.Run(async () =>
+        {
+            if (observationReady is not null)
+            {
+                Task first = observationStop is null
+                    ? await Task.WhenAny(observationReady, wait).WaitAsync(deadlineToken)
+                    : await Task.WhenAny(observationReady, wait, observationStop).WaitAsync(deadlineToken);
+                if (first != observationReady || wait.IsCompleted || observationStop?.IsCompleted == true)
+                    throw new IOException("The heartbeat child was not ready before the evaluator stopped.");
+                await observationReady;
+                deadlineToken.ThrowIfCancellationRequested();
+            }
+            string snapshot = await observeDescendants();
+            if (observationReady is not null && (wait.IsCompleted || observationStop?.IsCompleted == true))
+                throw new IOException("The heartbeat observation completed after the evaluator stopped.");
+            onObservationCompleted?.Invoke(snapshot);
+            return snapshot;
+        });
         onObservationStarted?.Invoke(observation);
         _ = observation.ContinueWith(
             static task => _ = task.Exception,
@@ -747,7 +794,8 @@ public sealed class MxcEvaluationRunner
     internal static async Task<MountlessWaitResult> ReleaseAndWaitAsync(
         Func<Task> release, Task wait, Func<Task<string>> observeDescendants,
         TimeSpan limit, CancellationToken cancellationToken, Action<Task> onReleaseStarted,
-        Action<Task> onObservationStarted, Func<Task> startKill, MxcEvaluationEvidence evidence)
+        Action<Task> onObservationStarted, Func<Task> startKill, MxcEvaluationEvidence evidence,
+        Task? observationReady = null, Task? observationStop = null, Action<string>? onObservationCompleted = null)
     {
         using var timeout = new CancellationTokenSource(limit);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token, cancellationToken);
@@ -772,7 +820,8 @@ public sealed class MxcEvaluationRunner
             return new(null, true);
         }
         Task<string> observation = await WaitForMountlessResultAsync(
-            wait, observeDescendants, linked.Token, cancellationToken, evidence, onObservationStarted);
+            wait, observeDescendants, linked.Token, cancellationToken, evidence, onObservationStarted,
+            observationReady, observationStop, onObservationCompleted);
         return new(observation, false);
     }
 
@@ -811,10 +860,56 @@ public sealed class MxcEvaluationRunner
         return drained;
     }
 
+    internal static async Task RecordDescendantObservationAsync(
+        Task<string> observation, string? requiredMarker, MxcEvaluationEvidence evidence)
+    {
+        try
+        {
+            evidence.DescendantBeforeStop = await observation.WaitAsync(TimeSpan.FromSeconds(1));
+            if (requiredMarker is not null && !HasSampleDescendant(evidence.DescendantBeforeStop, requiredMarker))
+                throw new IOException("The marked heartbeat child and its sample parent were not verified.");
+        }
+        catch (Exception exception)
+        {
+            string message = $"Descendant observation: {exception.Message}";
+            if (requiredMarker is null) evidence.Warnings.Add(message);
+            else
+            {
+                evidence.DescendantObservationError = message;
+                evidence.Outcome = EvaluationOutcome.InfrastructureFailure;
+            }
+        }
+    }
+
+    internal static bool HasSampleDescendant(string snapshot, string marker)
+    {
+        var processes = new Dictionary<int, (int Parent, string Command)>();
+        foreach (string line in snapshot.Split('\n'))
+        {
+            string[] columns = line.Split((char[]?)null, 3, StringSplitOptions.RemoveEmptyEntries);
+            if (columns.Length != 3 || !int.TryParse(columns[0], out int pid)
+                || !int.TryParse(columns[1], out int parent) || pid <= 0 || parent < 0)
+                continue;
+            if (!processes.TryAdd(pid, (parent, columns[2].Trim()))) return false;
+        }
+        int[] samplePids = processes
+            .Where(process => process.Value.Command == "/bin/sh /workspace/sample.sh")
+            .Select(process => process.Key).ToArray();
+        if (samplePids.Length != 1) return false;
+        int samplePid = samplePids[0];
+        return processes.Count(process =>
+        {
+            if (process.Key == samplePid || process.Value.Parent != samplePid) return false;
+            string[] arguments = process.Value.Command.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            return arguments.Length >= 4 && arguments[0] == "/bin/sh" && arguments[1] == "-c"
+                && arguments[^1] == marker;
+        }) == 1;
+    }
+
     private static async Task<string> ObserveDescendantsAsync(string session, string containerId)
     {
         var result = await RunDaemonCommandAsync(
-            session, ["docker", "top", containerId, "-eo", "pid,ppid,args"], TimeSpan.FromSeconds(10));
+            session, ["docker", "top", containerId, "-ww", "-eo", "pid,ppid,args"], TimeSpan.FromSeconds(10));
         if (result.ExitCode != 0) throw new IOException($"Descendants could not be observed: {result.StandardError}");
         return result.StandardOutput;
     }
@@ -925,14 +1020,16 @@ public sealed class MxcEvaluationRunner
         int count;
         while ((count = await reader.ReadAsync(buffer)) != 0)
         {
-            output.Append(new string(buffer, 0, count));
-            afterRead?.Invoke();
+            output.Append(new string(buffer, 0, count), afterRead);
         }
     }
 
     internal static bool HasLine(string text, string marker) => text
         .Replace("\r\n", "\n", StringComparison.Ordinal)
         .Split('\n').Contains(marker, StringComparer.Ordinal);
+    internal static bool HasCompleteLine(string text, string marker) =>
+        ("\n" + text.Replace("\r\n", "\n", StringComparison.Ordinal))
+            .Contains($"\n{marker}\n", StringComparison.Ordinal);
     private static string Quote(string text) => $"'{text.Replace("'", "'\\''", StringComparison.Ordinal)}'";
     private static string Unix(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal);
     private static string Hash(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
@@ -943,7 +1040,7 @@ public sealed class MxcEvaluationRunner
         private readonly StringBuilder _text = new();
         public bool Truncated { get; private set; }
         public string Text { get { using (_gate.EnterScope()) return _text.ToString(); } }
-        public void Append(string text)
+        public void Append(string text, Action? afterAppend = null)
         {
             using (_gate.EnterScope())
             {
@@ -951,6 +1048,7 @@ public sealed class MxcEvaluationRunner
                 _text.Append(text.AsSpan(0, Math.Min(remaining, text.Length)));
                 Truncated |= text.Length > remaining;
             }
+            afterAppend?.Invoke();
             observer?.Invoke(text);
         }
     }
@@ -969,7 +1067,8 @@ internal sealed record MxcEvaluationOptions(
     bool FailCapture = false,
     bool LongRunning = false,
     TimeSpan? Limit = null,
-    Action<string>? Output = null);
+    Action<string>? Output = null,
+    Action? DescendantObserved = null);
 
 internal sealed class MxcEvaluationEvidence
 {
@@ -982,7 +1081,7 @@ internal sealed class MxcEvaluationEvidence
     public DateTimeOffset? CompletedUtc { get; set; }
     public EvaluationSample Sample { get; init; }
     public EvaluationOutcome Outcome { get; set; } = EvaluationOutcome.Blocked;
-    public EvaluationOutcome OutcomeBeforeCapture { get; set; }
+    public EvaluationOutcome? OutcomeBeforeCapture { get; set; }
     public string Windows { get; init; } = "";
     public string DotNet { get; init; } = "";
     public string? NativeVersion { get; set; }
@@ -1026,7 +1125,9 @@ internal sealed class MxcEvaluationEvidence
     public string StandardOutput { get; set; } = "";
     public string StandardError { get; set; } = "";
     public bool OutputTruncated { get; set; }
+    public string? DescendantMarker { get; init; }
     public string? DescendantBeforeStop { get; set; }
+    public string? DescendantObservationError { get; set; }
     public bool HeartbeatStopped { get; set; }
     public string? ProjectArchivePath { get; set; }
     public string? CaptureError { get; set; }

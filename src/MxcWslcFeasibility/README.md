@@ -79,11 +79,18 @@ completion, cancellation or timeout, pause and paused-state verification share
 a one-second deadline; only a verified pause permits the ten-second-bounded
 copy. The host initiates `Kill` in a `finally` path if either step fails or
 stalls. Capture or cleanup failure is reported as an infrastructure failure.
-The descendant controls retain process observations, a stopped heartbeat, and
-confirmation that the owned session disappeared.
+For the synthetic descendant control, the heartbeat child emits a run-specific
+readiness marker after its first write. A subsequent process snapshot,
+completed before stop starts, must show a distinct marked child whose PPID is
+the sample process's PID. Readiness and observation never delay cancellation
+or an independently initiated stop; missing, late, or invalid descendant
+evidence is an infrastructure failure. The control also checks that the
+heartbeat stopped and the owned session disappeared.
 
 JSON Run evidence is saved before final disposal and updated after cleanup
-under `%LOCALAPPDATA%\compareModels\Feasibility\Evidence`. The resulting
+under `%LOCALAPPDATA%\compareModels\Feasibility\Evidence`. `outcomeBeforeCapture`
+is null until an actual pre-capture outcome is recorded; later capture or
+cleanup failures can override the final outcome. The resulting
 workspace is retained as `...\MxcWslc\<run-id>\workspace.tar`, outside the
 deleted image store. The archive is limited to 1 MiB and 1,000 entries and is
 validated for contained, unique entry paths and supported entry types. It is
@@ -103,6 +110,8 @@ dotnet test .\src\MxcWslcFeasibility.Tests\MxcWslcFeasibility.Tests.csproj
 
 Without that setting, integration tests report the missing approval rather
 than silently passing. The no-approval blocking test can run independently.
+The deterministic shell regressions require Git for Windows `sh.exe` on
+`PATH` and its `/usr/bin/timeout`.
 
 Controls cover correct/incorrect/tampered changes, writable checks, incomplete
 privilege dropping, missing commands, subject exit 126, unavailable final
@@ -119,11 +128,11 @@ source record and do not independently prove the Windows directory backing the
 guest mount. See the [investigation](../../docs/research/mxc-wslc-protected-evaluation.md#wslc-305-mount-source-investigation)
 for the version-pinned source and observed mapping limitation.
 
-The mountless runner's 47 test cases passed on Windows
+The mountless runner's 72 test cases passed on Windows
 `10.0.26300.9974`, WSL `3.0.5.0`,
 WSLC `3.0.5`, kernel `6.18.58.1-1`, .NET runtime `10.0.15`, and SDK
 `10.0.404`, including deterministic stalled/failing-operation tests and real
-synthetic Evaluation controls after the lifecycle-deadline refinements.
+synthetic Evaluation controls with the stricter marked-child observation.
 
 | Control | Observed outcome |
 | --- | --- |
@@ -131,7 +140,7 @@ synthetic Evaluation controls after the lifecycle-deadline refinements.
 | Effective boundary | Network `none`, non-privileged mode, zero mounts, denied check writes, and non-root capability-free sample execution. |
 | Unsafe / unavailable protections | Writable authoritative check, incomplete bounding-set drop, and missing final integrity were Blocked. |
 | Result distinctions | Missing command was Unrunnable; subject exit 126 was an executed Failed check; a retention failure was InfrastructureFailure with the earlier Passed outcome preserved. |
-| Cancellation / timeout | Distinct outcomes, a descendant observed before stopping, heartbeat stopped, and owned session absent afterward. |
+| Cancellation / timeout | Distinct outcomes, a marked child and its sample parent observed by PID/PPID before stopping, heartbeat stopped, and owned session absent afterward. |
 | Persistence / cleanup | A validated, unextracted project tar and JSON remained accessible; owned stores were removed and an unrelated container remained usable. A deliberately failed copy after pause produced an infrastructure failure. |
 
 The native comparison initially exposed an image/probe mismatch: a Debian

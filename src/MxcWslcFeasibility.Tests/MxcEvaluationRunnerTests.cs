@@ -1,6 +1,8 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Formats.Tar;
+using System.Diagnostics;
 using Microsoft.Mxc.Sdk.V1;
 using Microsoft.WSL.Containers;
 using WslContainerFeasibility;
@@ -23,6 +25,107 @@ public sealed class MxcEvaluationRunnerTests
     public void GivenOutputLine_WhenIntegrityMarkerIsChecked_OnlyExactLinesMatch(string output, bool expected) =>
         Assert.Equal(expected, MxcEvaluationRunner.HasLine(output, "MXC_INTEGRITY_AFTER"));
 
+    [Theory]
+    [InlineData("CHILD_READY=run", false)]
+    [InlineData("CHILD_READY=run\n", true)]
+    [InlineData("other\nCHILD_READY=run\r\n", true)]
+    [InlineData("prefixCHILD_READY=run\n", false)]
+    [InlineData("prefixCHILD_READY=run\nCHILD_READY=run", false)]
+    public void GivenChildReadinessOutput_WhenChecking_OnlyCompleteExactLinesCount(string output, bool expected) =>
+        Assert.Equal(expected, MxcEvaluationRunner.HasCompleteLine(output, "CHILD_READY=run"));
+
+    [Theory]
+    [InlineData(null, 0)]
+    [InlineData("host.txt", 70)]
+    [InlineData("credential.txt", 70)]
+    public async Task GivenApostropheInCanaryPath_WhenGuardRuns_ReadableCanariesAreRejected(
+        string? readableCanary, int expectedExitCode)
+    {
+        string canaries = $"canary-{Guid.NewGuid():N}'s";
+        Directory.CreateDirectory(canaries);
+        try
+        {
+            if (readableCanary is not null)
+                await File.WriteAllTextAsync(Path.Combine(canaries, readableCanary), "readable");
+            string orchestrator = MxcEvaluationRunner.CreateOrchestrator(
+                new(EvaluationSample.Correct), "UNSET_CREDENTIAL", canaries, "sample", "check");
+            string guard = Assert.Single(orchestrator.Split('\n'),
+                line => line.TrimStart().StartsWith("[ ! -r ", StringComparison.Ordinal));
+            using var shell = new System.Diagnostics.Process
+            {
+                StartInfo = new ProcessStartInfo("sh.exe")
+                {
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false
+                }
+            };
+            shell.StartInfo.ArgumentList.Add("-c");
+            shell.StartInfo.ArgumentList.Add($"{guard}\nprintf 'GUARD_PASSED\\n'");
+            Assert.True(shell.Start());
+            await shell.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            string stdout = await shell.StandardOutput.ReadToEndAsync();
+            string stderr = await shell.StandardError.ReadToEndAsync();
+            Assert.True(shell.ExitCode == expectedExitCode,
+                $"Expected exit {expectedExitCode}, got {shell.ExitCode}; stdout: {stdout}; stderr: {stderr}");
+        }
+        finally
+        {
+            Directory.Delete(canaries, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task GivenHeartbeatSample_WhenChildStarts_ReadyRequiresASuccessfulHeartbeat(bool writable)
+    {
+        string heartbeat = $"heartbeat-{Guid.NewGuid():N}";
+        const string marker = "comparemodels-evaluation-child-test-run";
+        if (!writable) Directory.CreateDirectory(heartbeat);
+        using var shell = new System.Diagnostics.Process
+        {
+            StartInfo = new ProcessStartInfo("sh.exe")
+            {
+                RedirectStandardError = true,
+                UseShellExecute = false
+            }
+        };
+        shell.StartInfo.ArgumentList.Add("-c");
+        shell.StartInfo.ArgumentList.Add("/usr/bin/timeout -k 1s 1s /bin/sh -c \"$1\"");
+        shell.StartInfo.ArgumentList.Add("heartbeat-harness");
+        shell.StartInfo.ArgumentList.Add(MxcEvaluationRunner.CreateLongRunningSample(marker, heartbeat));
+        bool started = false;
+        try
+        {
+            started = shell.Start();
+            Assert.True(started);
+            string errors = await shell.StandardError.ReadToEndAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            await shell.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            if (writable)
+            {
+                Assert.Contains($"CHILD_READY={marker}\n", errors);
+                Assert.StartsWith("x", await File.ReadAllTextAsync(heartbeat));
+            }
+            else
+            {
+                Assert.DoesNotContain("CHILD_READY", errors);
+                Assert.NotEqual(0, shell.ExitCode);
+                Assert.NotEqual(124, shell.ExitCode);
+            }
+        }
+        finally
+        {
+            if (started && !shell.HasExited)
+            {
+                shell.Kill(entireProcessTree: true);
+                await shell.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            if (File.Exists(heartbeat)) File.Delete(heartbeat);
+            if (Directory.Exists(heartbeat)) Directory.Delete(heartbeat);
+        }
+    }
+
     [Fact]
     public void GivenEffectiveBoundary_WhenAnyMountIsPresent_ItIsRejected()
     {
@@ -37,6 +140,229 @@ public sealed class MxcEvaluationRunnerTests
             using var document = JsonDocument.Parse(
                 $$"""{"Id":"id","Image":"sha256:{{MxcImage.ConfigSha256}}","HostConfig":{"Privileged":false,"NetworkMode":"none"},"Mounts":{{mounts}}}""");
             Assert.Equal(mounts == "[]", MxcEvaluationRunner.HasMountlessBoundary(document.RootElement, "id"));
+        }
+    }
+
+    [Theory]
+    [InlineData("PID PPID COMMAND\n100 1 /bin/sh -c while :; do :; done\n200 100 /bin/sh /workspace/sample.sh\n201 200 /bin/sh -c while :; do :; done comparemodels-evaluation-child-test-run\n", true)]
+    [InlineData("PID PPID COMMAND\n100 1 /bin/sh -c while :; do :; done comparemodels-evaluation-child-test-run\n", false)]
+    [InlineData("PID PPID COMMAND\n200 100 /bin/sh /workspace/sample.sh\n201 999 /bin/sh -c while :; do :; done comparemodels-evaluation-child-test-run\n", false)]
+    [InlineData("PID PPID COMMAND\n200 100 /bin/sh /workspace/sample.sh\n201 200 /bin/sh -c while :; do :; done comparemodels-evaluation-child-test-run-other\n", false)]
+    [InlineData("PID PPID COMMAND\n200 100 /bin/sh /workspace/sample.sh\n200 200 /bin/sh -c while :; do :; done comparemodels-evaluation-child-test-run\n", false)]
+    public async Task GivenProcessSnapshot_WhenRecordingDescendant_RequiresDistinctMarkedChildOfSample(
+        string snapshot, bool valid)
+    {
+        var evidence = new MxcEvaluationEvidence
+        {
+            Outcome = EvaluationOutcome.Cancelled,
+            OutcomeBeforeCapture = EvaluationOutcome.Cancelled
+        };
+        await MxcEvaluationRunner.RecordDescendantObservationAsync(
+            Task.FromResult(snapshot), "comparemodels-evaluation-child-test-run", evidence);
+
+        Assert.Equal(snapshot, evidence.DescendantBeforeStop);
+        Assert.Equal(valid ? EvaluationOutcome.Cancelled : EvaluationOutcome.InfrastructureFailure, evidence.Outcome);
+        Assert.Equal(EvaluationOutcome.Cancelled, evidence.OutcomeBeforeCapture);
+        if (valid) Assert.Null(evidence.DescendantObservationError);
+        else Assert.NotNull(evidence.DescendantObservationError);
+    }
+
+    [Fact]
+    public async Task GivenFailedDescendantObservation_WhenRecording_ItIsAnInfrastructureFailure()
+    {
+        var evidence = new MxcEvaluationEvidence
+        {
+            Outcome = EvaluationOutcome.TimedOut,
+            OutcomeBeforeCapture = EvaluationOutcome.TimedOut
+        };
+        await MxcEvaluationRunner.RecordDescendantObservationAsync(
+            Task.FromException<string>(new IOException("inspection failed")),
+            "comparemodels-evaluation-child-test-run", evidence);
+
+        Assert.Equal(EvaluationOutcome.InfrastructureFailure, evidence.Outcome);
+        Assert.Equal(EvaluationOutcome.TimedOut, evidence.OutcomeBeforeCapture);
+        Assert.Contains("inspection failed", evidence.DescendantObservationError);
+    }
+
+    [Fact]
+    public async Task GivenStalledDescendantObservation_WhenRecording_ItIsAnInfrastructureFailure()
+    {
+        var inspection = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var evidence = new MxcEvaluationEvidence
+        {
+            Outcome = EvaluationOutcome.Cancelled,
+            OutcomeBeforeCapture = EvaluationOutcome.Cancelled
+        };
+        try
+        {
+            await MxcEvaluationRunner.RecordDescendantObservationAsync(
+                inspection.Task, "comparemodels-evaluation-child-test-run", evidence).WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.Equal(EvaluationOutcome.InfrastructureFailure, evidence.Outcome);
+            Assert.Equal(EvaluationOutcome.Cancelled, evidence.OutcomeBeforeCapture);
+            Assert.NotNull(evidence.DescendantObservationError);
+            Assert.False(inspection.Task.IsCompleted);
+        }
+        finally { inspection.TrySetResult("late"); }
+    }
+
+    [Fact]
+    public async Task GivenOptionalObservationFailure_WhenRecording_ExistingOutcomeIsPreserved()
+    {
+        var evidence = new MxcEvaluationEvidence { Outcome = EvaluationOutcome.Cancelled };
+        await MxcEvaluationRunner.RecordDescendantObservationAsync(
+            Task.FromException<string>(new IOException("inspection failed")), null, evidence);
+        Assert.Equal(EvaluationOutcome.Cancelled, evidence.Outcome);
+        Assert.Null(evidence.DescendantObservationError);
+        Assert.Contains(evidence.Warnings, warning => warning.Contains("inspection failed", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task GivenChildNotReady_WhenWaiting_ObservationStartsOnlyAfterReadiness()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var scheduled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var inspected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var evidence = new MxcEvaluationEvidence();
+        Task<MountlessWaitResult> run = MxcEvaluationRunner.ReleaseAndWaitAsync(
+            () => Task.CompletedTask, Task.Delay(Timeout.InfiniteTimeSpan),
+            () => { inspected.TrySetResult(); return Task.FromResult("snapshot"); },
+            TimeSpan.FromSeconds(30), cancellation.Token, _ => { }, _ => scheduled.TrySetResult(),
+            () => Task.CompletedTask, evidence, observationReady: ready.Task);
+        try
+        {
+            await scheduled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.NotSame(inspected.Task, await Task.WhenAny(inspected.Task, Task.Delay(250)));
+            ready.TrySetResult();
+            await inspected.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            cancellation.Cancel();
+            var result = await run.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal("snapshot", await result.Observation!);
+        }
+        finally
+        {
+            ready.TrySetResult();
+            cancellation.Cancel();
+            await run.WaitAsync(TimeSpan.FromSeconds(3));
+        }
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task GivenStalledReadinessOrObservation_WhenCancelledOrTimedOut_StopStarts(
+        bool stallObservation, bool timedOut)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var scheduled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var inspecting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseInspection = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stop = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var owned = new List<Task>();
+        var evidence = new MxcEvaluationEvidence();
+        Task StartKill() { stop.TrySetResult(); return Task.CompletedTask; }
+        Task<MountlessWaitResult> run = MxcEvaluationRunner.ReleaseAndWaitAsync(
+            () => Task.CompletedTask, Task.Delay(Timeout.InfiniteTimeSpan),
+            async () => { inspecting.TrySetResult(); await releaseInspection.Task; return "snapshot"; },
+            TimeSpan.FromMilliseconds(timedOut ? 750 : 30_000), cancellation.Token, _ => { },
+            task => { owned.Add(task); scheduled.TrySetResult(); }, StartKill, evidence,
+            observationReady: ready.Task, observationStop: stop.Task);
+        try
+        {
+            await scheduled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            if (stallObservation)
+            {
+                ready.TrySetResult();
+                await inspecting.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            }
+            if (!timedOut) cancellation.Cancel();
+            MountlessWaitResult result = await run.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.Equal(timedOut ? EvaluationOutcome.TimedOut : EvaluationOutcome.Cancelled, evidence.Outcome);
+
+            await MxcEvaluationRunner.FreezeAndCaptureAsync(
+                () => Task.CompletedTask, () => Task.FromResult(true),
+                () => Task.FromResult(Array.Empty<byte>()), StartKill, TimeSpan.FromSeconds(1));
+            await stop.Task.WaitAsync(TimeSpan.FromSeconds(1));
+            if (stallObservation)
+            {
+                Assert.False(result.Observation!.IsCompleted);
+                Assert.False(MxcEvaluationRunner.CanRemoveCanaries(true, true, true, owned));
+            }
+            else
+            {
+                await Assert.ThrowsAnyAsync<Exception>(() => result.Observation!.WaitAsync(TimeSpan.FromSeconds(2)));
+                Assert.False(inspecting.Task.IsCompleted);
+            }
+        }
+        finally
+        {
+            cancellation.Cancel();
+            ready.TrySetResult();
+            releaseInspection.TrySetResult();
+            var result = await run.WaitAsync(TimeSpan.FromSeconds(3));
+            if (result.Observation is not null)
+                try { await result.Observation.WaitAsync(TimeSpan.FromSeconds(3)); } catch (Exception) { }
+        }
+    }
+
+    [Fact]
+    public async Task GivenUnreadyChild_WhenStopStartsIndependently_ObservationIsAbandoned()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var scheduled = new TaskCompletionSource<Task>(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool inspected = false;
+        Task StartKill() { stopped.TrySetResult(); return Task.CompletedTask; }
+        Task<MountlessWaitResult> run = MxcEvaluationRunner.ReleaseAndWaitAsync(
+            () => Task.CompletedTask, Task.Delay(Timeout.InfiniteTimeSpan),
+            () => { inspected = true; return Task.FromResult("snapshot"); },
+            TimeSpan.FromSeconds(30), cancellation.Token, _ => { }, task => scheduled.TrySetResult(task),
+            StartKill, new MxcEvaluationEvidence(), observationReady: ready.Task, observationStop: stopped.Task);
+        try
+        {
+            Task observation = await scheduled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await StartKill().WaitAsync(TimeSpan.FromSeconds(1));
+            await Assert.ThrowsAsync<IOException>(() => observation.WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.False(inspected);
+        }
+        finally
+        {
+            cancellation.Cancel();
+            await run.WaitAsync(TimeSpan.FromSeconds(3));
+        }
+    }
+
+    [Fact]
+    public async Task GivenStartedObservation_WhenStopPrecedesItsCompletion_LateSnapshotIsRejected()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var scheduled = new TaskCompletionSource<Task>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var inspecting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var snapshot = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<MountlessWaitResult> run = MxcEvaluationRunner.ReleaseAndWaitAsync(
+            () => Task.CompletedTask, Task.Delay(Timeout.InfiniteTimeSpan),
+            () => { inspecting.TrySetResult(); return snapshot.Task; },
+            TimeSpan.FromSeconds(30), cancellation.Token, _ => { }, task => scheduled.TrySetResult(task),
+            () => { stopped.TrySetResult(); return Task.CompletedTask; }, new MxcEvaluationEvidence(),
+            observationReady: Task.CompletedTask, observationStop: stopped.Task);
+        try
+        {
+            Task observation = await scheduled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await inspecting.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            stopped.TrySetResult();
+            snapshot.TrySetResult("late snapshot");
+            await Assert.ThrowsAsync<IOException>(() => observation.WaitAsync(TimeSpan.FromSeconds(2)));
+        }
+        finally
+        {
+            snapshot.TrySetResult("late snapshot");
+            cancellation.Cancel();
+            await run.WaitAsync(TimeSpan.FromSeconds(3));
         }
     }
 
@@ -247,6 +573,17 @@ public sealed class MxcEvaluationRunnerTests
         Assert.True(killed);
         Assert.Equal(EvaluationOutcome.Cancelled, evidence.OutcomeBeforeCapture);
         Assert.Equal(EvaluationOutcome.InfrastructureFailure, evidence.Outcome);
+        string local = Path.Combine(Environment.CurrentDirectory, $"evidence-{Guid.NewGuid():N}");
+        try
+        {
+            string path = await WslFixtureRunner.SaveEvidenceAsync(local, "interrupted", evidence);
+            using var document = JsonDocument.Parse(await File.ReadAllTextAsync(path));
+            Assert.Equal("Cancelled", document.RootElement.GetProperty("outcomeBeforeCapture").GetString());
+        }
+        finally
+        {
+            if (Directory.Exists(local)) Directory.Delete(local, recursive: true);
+        }
     }
 
     [Fact]
@@ -321,12 +658,21 @@ public sealed class MxcEvaluationRunnerTests
     [Fact]
     public async Task GivenNoTelemetryApproval_WhenEvaluated_NativeInitializationIsBlocked()
     {
-        var result = await _sut.RunAsync(EvaluationSample.Correct, false);
-        using var evidence = await ReadEvidenceAsync(result);
-        Assert.Equal(EvaluationOutcome.Blocked, result.Outcome);
-        Assert.Equal(JsonValueKind.Null, evidence.RootElement.GetProperty("nativeVersion").ValueKind);
-        Assert.False(evidence.RootElement.GetProperty("checkStarted").GetBoolean());
-        Assert.Null(result.ProjectArchivePath);
+        string local = Path.Combine(Environment.CurrentDirectory, $"evidence-{Guid.NewGuid():N}");
+        try
+        {
+            var result = await _sut.RunForTestAsync(new(EvaluationSample.Correct), false, localApplicationData: local);
+            using var evidence = await ReadEvidenceAsync(result);
+            Assert.Equal(EvaluationOutcome.Blocked, result.Outcome);
+            Assert.Equal(JsonValueKind.Null, evidence.RootElement.GetProperty("nativeVersion").ValueKind);
+            Assert.Null(evidence.RootElement.GetProperty("outcomeBeforeCapture").GetString());
+            Assert.False(evidence.RootElement.GetProperty("checkStarted").GetBoolean());
+            Assert.Null(result.ProjectArchivePath);
+        }
+        finally
+        {
+            if (Directory.Exists(local)) Directory.Delete(local, recursive: true);
+        }
     }
 
     [Fact]
@@ -455,6 +801,7 @@ public sealed class MxcEvaluationRunnerTests
         Assert.True(result.Outcome == EvaluationOutcome.Blocked, result.Summary);
         Assert.False(evidence.RootElement.GetProperty("checkStarted").GetBoolean());
         Assert.False(evidence.RootElement.GetProperty("boundaryVerified").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, evidence.RootElement.GetProperty("outcomeBeforeCapture").ValueKind);
     }
 
     [Fact]
@@ -489,6 +836,7 @@ public sealed class MxcEvaluationRunnerTests
         RequireTelemetryApproval();
         using var cancellation = new CancellationTokenSource();
         var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var observed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var received = new StringBuilder();
         var gate = new Lock();
         var options = new MxcEvaluationOptions(EvaluationSample.Correct, LongRunning: true,
@@ -497,26 +845,35 @@ public sealed class MxcEvaluationRunnerTests
                 using (gate.EnterScope())
                 {
                     received.Append(text);
-                    if (received.ToString().Contains("CHILD_READY", StringComparison.Ordinal)
+                    if (received.ToString().Contains("CHILD_READY=", StringComparison.Ordinal)
                         && received.ToString().Contains("HEARTBEAT", StringComparison.Ordinal))
                         ready.TrySetResult();
                 }
-            });
+            }, DescendantObserved: () => observed.TrySetResult());
         var run = _sut.RunForTestAsync(options, true, cancellation.Token);
         try
         {
-            Task first = await Task.WhenAny(ready.Task, run).WaitAsync(TimeSpan.FromMinutes(3));
-            Assert.True(first == ready.Task, first == run ? (await run).Summary : "The descendant did not start.");
+            Task readyAndObserved = Task.WhenAll(ready.Task, observed.Task);
+            Task first = await Task.WhenAny(readyAndObserved, run).WaitAsync(TimeSpan.FromMinutes(3));
+            Assert.True(first == readyAndObserved, first == run ? (await run).Summary : "The descendant was not observed.");
             if (!timedOut) cancellation.Cancel();
             var result = await run.WaitAsync(TimeSpan.FromSeconds(90));
             using var evidence = await ReadEvidenceAsync(result);
             var root = evidence.RootElement;
             Assert.True(result.Outcome == (timedOut ? EvaluationOutcome.TimedOut : EvaluationOutcome.Cancelled), result.Summary);
-            Assert.Contains("while", root.GetProperty("descendantBeforeStop").GetString());
+            string marker = Assert.IsType<string>(root.GetProperty("descendantMarker").GetString());
+            string snapshot = Assert.IsType<string>(root.GetProperty("descendantBeforeStop").GetString());
+            Match parent = Regex.Match(snapshot, @"(?m)^\s*(?<pid>\d+)\s+\d+\s+/bin/sh\s+/workspace/sample\.sh\s*$");
+            Match child = Regex.Match(snapshot,
+                $@"(?m)^\s*(?<pid>\d+)\s+(?<ppid>\d+)\s+/bin/sh\s+-c\s+[^\r\n]*\s{Regex.Escape(marker)}\s*$");
+            Assert.True(parent.Success, snapshot);
+            Assert.True(child.Success, snapshot);
+            Assert.NotEqual(parent.Groups["pid"].Value, child.Groups["pid"].Value);
+            Assert.Equal(parent.Groups["pid"].Value, child.Groups["ppid"].Value);
             Assert.True(root.GetProperty("heartbeatStopped").GetBoolean());
             Assert.True(root.GetProperty("sessionAbsentAfterCleanup").GetBoolean());
             Assert.Empty(root.GetProperty("cleanupErrors").EnumerateArray());
-            Assert.Contains("CHILD_READY", ReadProjectFile(result, "sample.sh"));
+            Assert.Contains(marker, ReadProjectFile(result, "sample.sh"));
         }
         finally
         {

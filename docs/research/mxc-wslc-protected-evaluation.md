@@ -141,12 +141,20 @@ tar is size- and entry-limited, validated, and retained **without extraction**;
 it remains untrusted and may contain symlinks. A stalled debug operation, Kill,
 or disposal is reported as a cleanup failure, and the store and host canaries
 are retained. Descendant-observation tasks are included in this ownership gate.
+The synthetic heartbeat child now reports a run-specific readiness marker
+after a successful write; an asynchronous snapshot completed before stop
+starts must identify a distinct marked child and its sample parent by
+PID/PPID. Missing, stalled, late, or invalid descendant evidence is an
+infrastructure failure. Observation does not delay cancellation or an
+independently initiated stop.
 
-The final focused run passed 47 cases, including deterministic failed/stalled
+The final focused run passed 72 cases, including deterministic failed/stalled
 pause, verification, and copy operations and synthetic correct, incorrect,
 tampered, timeout, cancellation, and post-pause copy-failure controls. The
-timeout/cancellation controls observed a descendant, a stopped heartbeat, and
-an absent owned session. These are practical observations, not proof of a
+timeout/cancellation controls observed a distinct marked child and its sample
+parent by PID/PPID before stopping, a stopped heartbeat, and an absent owned
+session. The earlier 47-case run's process-row assertion did not establish a
+distinct child. These are practical observations, not proof of a
 mathematical termination bound or daemon-request cancellation; arbitrary
 container escapes, crash recovery, and extraction safety are not established.
 
